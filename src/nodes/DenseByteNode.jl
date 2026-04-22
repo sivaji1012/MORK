@@ -1057,7 +1057,7 @@ function node_get_payloads(n::AbstractByteNode{V,A},
     unrequested_cofree_half = false
     stashed_val = nothing   # Union{Nothing, V}
     last_byte   = nothing   # Union{Nothing, UInt8}
-    requested_mask = copy(n.mask)
+    requested_mask = n.mask
 
     for (i, (key, expect_val)) in enumerate(keys_expect_val)
         isempty(key) && continue
