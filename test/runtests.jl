@@ -193,19 +193,65 @@ using MORK
             # Root has two children: byte 1 and byte 9
             @test child_count(z) == 2
             m = child_mask(z)
-            @test m[Int(UInt8(1)) + 1]
-            @test m[Int(UInt8(9)) + 1]
-            @test !m[Int(UInt8(5)) + 1]
+            @test m isa ByteMask
+            @test m[UInt8(1)]
+            @test m[UInt8(9)]
+            @test !m[UInt8(5)]
             @test count(m) == 2
+            @test length(m) == 2
+            # Iteration yields set bytes in ascending order
+            @test collect(m) == UInt8[1, 9]
 
             descend_to_byte!(z, UInt8(1))
             descend_to_byte!(z, UInt8(2))
             # [1,2] branches into 3 and 4
             @test child_count(z) == 2
             m = child_mask(z)
-            @test m[Int(UInt8(3)) + 1]
-            @test m[Int(UInt8(4)) + 1]
+            @test m[UInt8(3)]
+            @test m[UInt8(4)]
             @test count(m) == 2
+            @test collect(m) == UInt8[3, 4]
+        end
+
+        @testset "ByteMask standalone" begin
+            # Empty
+            m = ByteMask()
+            @test count(m) == 0
+            @test isempty(m)
+            @test !m[UInt8(0)]
+            @test !m[UInt8(255)]
+            @test collect(m) == UInt8[]
+
+            # set / unset are non-mutating
+            m1 = set(m, UInt8(42))
+            @test m1[UInt8(42)]
+            @test !m[UInt8(42)]                # original unchanged
+            @test count(m1) == 1
+
+            m2 = set(m1, UInt8(100))
+            @test count(m2) == 2
+            @test collect(m2) == UInt8[42, 100]
+
+            m3 = unset(m2, UInt8(42))
+            @test count(m3) == 1
+            @test !m3[UInt8(42)]
+            @test m3[UInt8(100)]
+
+            # Boundary bits: 0, 63, 64, 127, 128, 191, 192, 255
+            for b in UInt8[0, 63, 64, 127, 128, 191, 192, 255]
+                mb = set(ByteMask(), b)
+                @test mb[b]
+                @test count(mb) == 1
+                @test collect(mb) == UInt8[b]
+            end
+
+            # Full mask
+            full = ByteMask()
+            for i in 0:255
+                full = set(full, UInt8(i))
+            end
+            @test count(full) == 256
+            @test length(full) == 256
         end
     end
 

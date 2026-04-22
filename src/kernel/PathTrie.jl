@@ -41,6 +41,123 @@ layout. Phase 1a of ADR-052/MORK_PACKAGE_PLAN Phase 1.
 """
 
 # ============================================================================
+# ByteMask — 256-bit fixed-size mask (port of pathmap::utils::ByteMask)
+# ============================================================================
+
+"""
+    ByteMask
+
+256-bit mask over UInt8 values. Stack-allocated, zero-allocation.
+Port of upstream `pathmap::utils::ByteMask`. Used throughout the
+pathmap/MORK API wherever a "which bytes are present" result is needed
+(e.g., `child_mask`).
+
+Stored as four `UInt64` words covering bit positions 0-255 in ascending
+order (word 0 holds bits for bytes 0-63, word 3 holds bits for bytes 192-255).
+
+Immutable — constructor variants produce new values rather than mutating.
+"""
+struct ByteMask
+    w0::UInt64   # bytes 0..63
+    w1::UInt64   # bytes 64..127
+    w2::UInt64   # bytes 128..191
+    w3::UInt64   # bytes 192..255
+end
+
+ByteMask() = ByteMask(UInt64(0), UInt64(0), UInt64(0), UInt64(0))
+
+@inline function _bm_word_bit(b::UInt8)::Tuple{Int, Int}
+    # Returns (word_index 0..3, bit_index 0..63)
+    i = Int(b)
+    return (i >> 6, i & 0x3F)
+end
+
+"""
+    mask[b::UInt8] -> Bool
+
+Test whether byte `b` is set in the mask.
+"""
+@inline function Base.getindex(mask::ByteMask, b::UInt8)::Bool
+    w, bit = _bm_word_bit(b)
+    word = w == 0 ? mask.w0 :
+           w == 1 ? mask.w1 :
+           w == 2 ? mask.w2 :
+                    mask.w3
+    return (word >> bit) & UInt64(1) != UInt64(0)
+end
+
+"""
+    set(mask::ByteMask, b::UInt8) -> ByteMask
+
+Return a new mask with byte `b` set.
+"""
+function set(mask::ByteMask, b::UInt8)::ByteMask
+    w, bit = _bm_word_bit(b)
+    one_at = UInt64(1) << bit
+    return w == 0 ? ByteMask(mask.w0 | one_at, mask.w1, mask.w2, mask.w3) :
+           w == 1 ? ByteMask(mask.w0, mask.w1 | one_at, mask.w2, mask.w3) :
+           w == 2 ? ByteMask(mask.w0, mask.w1, mask.w2 | one_at, mask.w3) :
+                    ByteMask(mask.w0, mask.w1, mask.w2, mask.w3 | one_at)
+end
+
+"""
+    unset(mask::ByteMask, b::UInt8) -> ByteMask
+
+Return a new mask with byte `b` cleared.
+"""
+function unset(mask::ByteMask, b::UInt8)::ByteMask
+    w, bit = _bm_word_bit(b)
+    clear = ~(UInt64(1) << bit)
+    return w == 0 ? ByteMask(mask.w0 & clear, mask.w1, mask.w2, mask.w3) :
+           w == 1 ? ByteMask(mask.w0, mask.w1 & clear, mask.w2, mask.w3) :
+           w == 2 ? ByteMask(mask.w0, mask.w1, mask.w2 & clear, mask.w3) :
+                    ByteMask(mask.w0, mask.w1, mask.w2, mask.w3 & clear)
+end
+
+"""
+    count(mask::ByteMask) -> Int
+
+Number of bytes set in the mask.
+"""
+Base.count(mask::ByteMask)::Int =
+    count_ones(mask.w0) + count_ones(mask.w1) + count_ones(mask.w2) + count_ones(mask.w3)
+
+"""
+    isempty(mask::ByteMask) -> Bool
+"""
+Base.isempty(mask::ByteMask)::Bool =
+    mask.w0 == 0 && mask.w1 == 0 && mask.w2 == 0 && mask.w3 == 0
+
+"""
+    iterate(mask::ByteMask)
+
+Iterate over set bytes in ascending order. Produces `UInt8` values.
+"""
+function Base.iterate(mask::ByteMask, state::Int=0)
+    while state < 256
+        if mask[UInt8(state)]
+            return (UInt8(state), state + 1)
+        end
+        state += 1
+    end
+    return nothing
+end
+
+Base.eltype(::Type{ByteMask}) = UInt8
+Base.IteratorSize(::Type{ByteMask}) = Base.HasLength()
+Base.length(mask::ByteMask) = count(mask)
+
+function Base.show(io::IO, mask::ByteMask)
+    n = count(mask)
+    print(io, "ByteMask(", n, " set")
+    if 0 < n <= 8
+        vals = [b for b in mask]
+        print(io, ": ", join(string.(vals), ", "))
+    end
+    print(io, ")")
+end
+
+# ============================================================================
 # Node + Trie structs
 # ============================================================================
 
@@ -368,15 +485,16 @@ Number of children branching from the current focus.
 child_count(z::AnyZipper)::Int = length(z.trie.arena[focus(z)].children)
 
 """
-    child_mask(z) -> BitVector
+    child_mask(z) -> ByteMask
 
-256-bit mask: bit `b+1` is true iff child byte `b` exists from focus.
-Port of upstream `Zipper::child_mask`.
+256-bit fixed mask of child bytes present at focus. Port of upstream
+`Zipper::child_mask` returning `pathmap::utils::ByteMask`. Zero-allocation
+(stack-allocated struct, four UInt64 words).
 """
-function child_mask(z::AnyZipper)::BitVector
-    mask = falses(256)
+function child_mask(z::AnyZipper)::ByteMask
+    mask = ByteMask()
     @inbounds for b in keys(z.trie.arena[focus(z)].children)
-        mask[Int(b) + 1] = true
+        mask = set(mask, b)
     end
     return mask
 end
@@ -781,6 +899,7 @@ end
 # Exports
 # ============================================================================
 
+export ByteMask, set, unset
 export PathTrie, TrieNode, ReadZipper, WriteZipper, AnyZipper
 export path_exists_at, create_path!, prune_path!
 export focus, at_root, is_val, val, child_count, child_mask
