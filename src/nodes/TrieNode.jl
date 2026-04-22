@@ -484,7 +484,7 @@ is_child(p::PayloadRef) = p._kind == 0x2
 
 function get_val(p::PayloadRef{V}) where V
     @assert is_val(p)
-    p._val[].x
+    p._val[]
 end
 
 function get_child(p::PayloadRef{V,A}) where {V,A}
@@ -527,6 +527,42 @@ end
 function into_child(voc::ValOrChild{V,A}) where {V,A}
     @assert is_child(voc)
     voc._child
+end
+
+# =====================================================================
+# FatAlgebraicResult helpers — used by pmeet_generic
+# =====================================================================
+#
+# FatAlgebraicResult{V} and fat_none/fat_element/to_algebraic_result are
+# defined in Ring.jl.  Only the pmeet-specific helpers are added here.
+
+"""
+    fat_from_binary_op_result(result, a, b) → FatAlgebraicResult
+
+Convert a binary-op `AlgebraicResult` into a `FatAlgebraicResult`, materialising
+`a` or `b` as the element when the result is Identity.
+Ports `FatAlgebraicResult::from_binary_op_result`.
+"""
+function fat_from_binary_op_result(result, a, b)
+    if result isa AlgResNone
+        return FatAlgebraicResult{Any}(UInt64(0), nothing)
+    elseif result isa AlgResElement
+        return FatAlgebraicResult{Any}(UInt64(0), result.value)
+    else  # AlgResIdentity
+        mask = result.mask
+        elem = (mask & SELF_IDENT != 0) ? a : b
+        return FatAlgebraicResult{Any}(mask, elem)
+    end
+end
+
+"""
+    fat_map(fat, f) → FatAlgebraicResult{Any}
+
+Apply `f` to `fat.element` (if non-nothing). Ports `FatAlgebraicResult::map`.
+"""
+function fat_map(fat::FatAlgebraicResult{W}, f) where W
+    elem2 = fat.element === nothing ? nothing : f(fat.element)
+    FatAlgebraicResult{Any}(fat.identity_mask, elem2)
 end
 
 # =====================================================================
@@ -682,19 +718,178 @@ function psubtract(a::Union{Nothing,TrieNodeODRc{V,A}},
 end
 
 # =====================================================================
-# pmeet_generic — DEFERRED
+# pmeet_generic family — ports trie_node.rs lines 541–715
 # =====================================================================
 #
-# Upstream:
-#   pub(crate) fn pmeet_generic<const MAX_PAYLOAD_CNT, V, A, MergeF>(...)
-#   pub(crate) fn pmeet_generic_internal(...)
-#   fn pmeet_generic_recursive_reset(...)
-#   pub(crate) fn node_count_branches_recursive(...)
-#
-# These functions require all concrete node types (DenseByteNode,
-# LineListNode, CellByteNode, TinyRefNode, EmptyNode) to be defined so
-# that `TaggedNodeRef` dispatch is complete.  They will be added to
-# `nodes/NodeAlgorithms.jl` once all node types are ported (Phase 1b).
+# Rust: pub(crate) fn pmeet_generic<const MAX_PAYLOAD_CNT, V, A, MergeF>(...)
+# Julia: runtime-sized; const-generic becomes ordinary parameter (unused).
+# `merge_f` takes Vector{Any} of Union{Nothing, ValOrChild} and returns TrieNodeODRc.
+
+"""
+    pmeet_generic_recursive_reset!(cur_group, is_ex_ref, idx, self_payloads, keys, req_results, results)
+
+Flush the current key-group by recursing into its child node, then reset the group.
+Ports `pmeet_generic_recursive_reset` (trie_node.rs, inlined into pmeet_generic_internal!).
+`cur_group` is NOT mutated (caller reassigns after return).
+"""
+function pmeet_generic_recursive_reset!(cur_group, is_ex_ref::Ref{Bool}, idx::Int,
+                                         self_payloads, keys, req_results, results)
+    cur_group === nothing && return
+    (group_start, next_node_rc) = cur_group
+    if group_start >= idx
+        return
+    end
+    group_range = group_start:idx-1
+    sub_self = view(self_payloads, group_range)
+    sub_keys = view(keys, group_range)
+    sub_res  = view(results, group_range)
+    if !pmeet_generic_internal!(sub_self, sub_keys, req_results, sub_res, as_tagged(next_node_rc))
+        is_ex_ref[] = false
+    end
+end
+
+"""
+    pmeet_generic_internal!(self_payloads, keys, req_results, results, other_node) → Bool
+
+Core recursive worker for `pmeet_generic`.  Fills `results` with
+`FatAlgebraicResult` for each self_payload entry.  Returns `is_exhaustive`.
+Ports `pmeet_generic_internal` (trie_node.rs lines 596–715).
+"""
+function pmeet_generic_internal!(self_payloads, keys, req_results, results,
+                                  other_node::AbstractTrieNode{V,A}) where {V,A}
+    is_ex_ref = Ref(true)
+
+    if !node_get_payloads(other_node, keys, req_results)
+        is_ex_ref[] = false
+    end
+
+    cur_group = nothing   # Union{Nothing, Tuple{Int, TrieNodeODRc{V,A}}}
+
+    for idx in 1:length(keys)
+        (consumed_bytes, payload) = req_results[idx]
+        req_results[idx] = (0, PayloadRef{V,A}())   # take (reset)
+
+        if !is_none(payload)
+            key_len = length(keys[idx][1])
+            if consumed_bytes < key_len
+                # Partial match — advance key and group by child node
+                old_key = keys[idx][1]
+                keys[idx] = (old_key[consumed_bytes+1:end], keys[idx][2])
+                child = get_child(payload)
+
+                if cur_group !== nothing
+                    (group_start, group_child) = cur_group
+                    if !(child === group_child)
+                        pmeet_generic_recursive_reset!(cur_group, is_ex_ref, idx,
+                                                       self_payloads, keys, req_results, results)
+                        cur_group = (idx, child)
+                    end
+                    # else: same child, extend group silently
+                else
+                    cur_group = (idx, child)
+                end
+            else
+                # Exact match
+                pmeet_generic_recursive_reset!(cur_group, is_ex_ref, idx,
+                                               self_payloads, keys, req_results, results)
+                cur_group = nothing
+
+                self_pr = self_payloads[idx][2]
+                fat_res = if is_child(self_pr)
+                    self_link = get_child(self_pr)
+                    other_link = get_child(payload)
+                    r = pmeet(self_link, other_link)
+                    fat_map(fat_from_binary_op_result(r, self_link, other_link),
+                            c -> ValOrChild(c))
+                else
+                    self_val = get_val(self_pr)
+                    other_val = get_val(payload)
+                    r = pmeet(self_val, other_val)
+                    fat_map(fat_from_binary_op_result(r, self_val, other_val),
+                            v -> ValOrChild(v))
+                end
+                results[idx] = fat_res
+            end
+        else
+            # No match in other_node — try get_node_at_key for deeper subtrie
+            pmeet_generic_recursive_reset!(cur_group, is_ex_ref, idx,
+                                           self_payloads, keys, req_results, results)
+            cur_group = nothing
+
+            self_pr = self_payloads[idx][2]
+            fat_res = if is_child(self_pr)
+                self_link = get_child(self_pr)
+                node_ref   = get_node_at_key(other_node, keys[idx][1])
+                other_opt  = into_option(node_ref)
+                if other_opt !== nothing
+                    r = pmeet_dyn(as_tagged(self_link), as_tagged(other_opt))
+                    fat_map(fat_from_binary_op_result(r, self_link, other_opt),
+                            c -> ValOrChild(c))
+                else
+                    if is_empty_node(self_link) && node_get_val(other_node, keys[idx][1]) !== nothing
+                        FatAlgebraicResult{Any}(SELF_IDENT, ValOrChild(TrieNodeODRc{V,A}()))
+                    else
+                        FatAlgebraicResult{Any}(COUNTER_IDENT, nothing)
+                    end
+                end
+            else
+                FatAlgebraicResult{Any}(COUNTER_IDENT, nothing)
+            end
+            results[idx] = fat_res
+        end
+    end
+
+    # Flush any remaining group
+    pmeet_generic_recursive_reset!(cur_group, is_ex_ref, length(keys)+1,
+                                   self_payloads, keys, req_results, results)
+
+    is_ex_ref[]
+end
+
+"""
+    pmeet_generic(self_payloads, other, merge_f) → AlgebraicResult{TrieNodeODRc}
+
+Generic lattice-meet over a node's payloads vs another node.
+Ports `pmeet_generic` (trie_node.rs lines 541–591).
+
+`self_payloads` must be sorted by key (ascending).
+`merge_f(payloads::Vector{Any})` receives the per-slot results (each is
+`Union{Nothing,ValOrChild{V,A}}`) and must return a `TrieNodeODRc`.
+"""
+function pmeet_generic(self_payloads::AbstractVector,
+                        other::AbstractTrieNode{V,A},
+                        merge_f::Function) where {V,A<:Allocator}
+    n = length(self_payloads)
+    n == 0 && return AlgResNone()
+
+    request_keys  = [(copy(p[1]), is_val(p[2])) for p in self_payloads]
+    element_results = [fat_none(Any) for _ in 1:n]
+    req_results     = [(0, PayloadRef{V,A}()) for _ in 1:n]
+
+    is_exhaustive = pmeet_generic_internal!(self_payloads, request_keys, req_results,
+                                             element_results, other)
+
+    is_none_all    = true
+    combined_mask  = SELF_IDENT | COUNTER_IDENT
+    result_payloads = Vector{Any}(undef, n)
+
+    for i in 1:n
+        res = element_results[i]
+        combined_mask   = combined_mask & res.identity_mask
+        is_none_all      = is_none_all && res.element === nothing
+        result_payloads[i] = res.element
+    end
+
+    is_none_all && return AlgResNone()
+
+    if !is_exhaustive
+        combined_mask = combined_mask & ~COUNTER_IDENT
+    end
+
+    combined_mask > 0 && return AlgResIdentity(combined_mask)
+
+    AlgResElement(merge_f(result_payloads))
+end
 
 # =====================================================================
 # TaggedNodeRef — DEFERRED
@@ -757,3 +952,6 @@ export ValOrChild, into_val, into_child
 
 export AbstractNodeRef, ANRNone, ANRBorrowedDyn, ANRBorrowedRc, ANRBorrowedTiny, ANROwnedRc
 export borrow, into_option
+
+export fat_from_binary_op_result, fat_map
+export pmeet_generic, pmeet_generic_internal!, pmeet_generic_recursive_reset!

@@ -91,15 +91,17 @@ function node_get_payloads(t::TinyRefNode{V,A}, keys_expect_val, results_buf) wh
     requested = false
     sk = t.key
     sklen = length(sk)
-    for (key, expect_val) in keys_expect_val
+    for (i, (key, expect_val)) in enumerate(keys_expect_val)
         if slice_starts_with(key, sk)
             if t.is_child
                 if !expect_val || sklen < length(key)
                     requested = true
+                    results_buf[i] = (sklen, PayloadRef{V,A}(0x2, nothing, into_child(t.payload)))
                 end
             else
                 if expect_val && sklen == length(key)
                     requested = true
+                    results_buf[i] = (sklen, PayloadRef{V,A}(0x1, Ref{V}(into_val(t.payload)), nothing))
                 end
             end
         end

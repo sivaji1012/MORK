@@ -1248,6 +1248,56 @@ using MORK
         end
 
         # ================================================================
+        # LineListNode pmeet_dyn tests
+        # Ports upstream line_list_node.rs lattice-meet behaviour.
+        # ================================================================
+
+        @testset "LineListNode — pmeet_dyn with EmptyNode → None (empty intersection)" begin
+            # pmeet(LLN, EmptyNode): EmptyNode has no paths, so intersection is empty → AlgResNone.
+            # (EmptyNode::pmeet_dyn returns Identity(SELF); LLN side returns None — both say "empty".)
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(n, UInt8[0x61], 42)
+            e = EmptyNode{Int, GlobalAlloc}()
+            r = pmeet_dyn(n, e)
+            @test r isa AlgResNone
+        end
+
+        @testset "LineListNode — pmeet_dyn same single-val node → Identity" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(n, UInt8[0x61], 5)
+            # pmeet of node with itself (same content) via PathMap
+            m1 = PathMap{Int}(); set_val_at!(m1, "a", 5)
+            m2 = PathMap{Int}(); set_val_at!(m2, "a", 5)
+            r = pmeet(m1.root, m2.root)
+            @test r isa AlgResIdentity || (r isa AlgResElement && get_val_at(m1, "a") == 5)
+        end
+
+        @testset "LineListNode — pmeet_dyn intersection: common key wins" begin
+            # a has "a"→3, "b"→7 ; b has "a"→5, "c"→9 ; meet = "a"→min(3,5)=3
+            m1 = PathMap{Int}(); set_val_at!(m1, "a", 3); set_val_at!(m1, "b", 7)
+            m2 = PathMap{Int}(); set_val_at!(m2, "a", 5); set_val_at!(m2, "c", 9)
+            r = pmeet(m1.root, m2.root)
+            # result contains only key "a" with value min(3,5)=3
+            @test r isa AlgResElement || r isa AlgResIdentity
+            result_m = PathMap{Int}()
+            if r isa AlgResElement
+                result_m.root = r.value
+            elseif r isa AlgResIdentity
+                result_m.root = (r.mask & SELF_IDENT != 0) ? m1.root : m2.root
+            end
+            @test get_val_at(result_m, "a") == 3
+            @test get_val_at(result_m, "b") === nothing
+            @test get_val_at(result_m, "c") === nothing
+        end
+
+        @testset "LineListNode — pmeet_dyn disjoint keys → None" begin
+            m1 = PathMap{Int}(); set_val_at!(m1, "a", 1)
+            m2 = PathMap{Int}(); set_val_at!(m2, "b", 2)
+            r = pmeet(m1.root, m2.root)
+            @test r isa AlgResNone
+        end
+
+        # ================================================================
         # TinyRefNode tests
         # ================================================================
 

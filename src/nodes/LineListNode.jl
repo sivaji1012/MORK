@@ -768,16 +768,18 @@ function node_get_payloads(n::LineListNode{V,A}, keys_expect_val, results_buf) w
     slot0_requested = !is_used_0(n)
     slot1_requested = !is_used_1(n)
     (k0, k1) = get_both_keys(n)
-    for (key, expect_val) in keys_expect_val
+    for (i, (key, expect_val)) in enumerate(keys_expect_val)
         if is_used_0(n) && slice_starts_with(key, k0)
             klen = key_len_0(n)
             if is_child_0(n)
                 if !expect_val || klen < length(key)
                     slot0_requested = true
+                    results_buf[i] = (klen, PayloadRef{V,A}(0x2, nothing, into_child(n.slot0)))
                 end
             else
                 if expect_val && klen == length(key)
                     slot0_requested = true
+                    results_buf[i] = (klen, PayloadRef{V,A}(0x1, Ref{V}(into_val(n.slot0)), nothing))
                 end
             end
         end
@@ -786,10 +788,12 @@ function node_get_payloads(n::LineListNode{V,A}, keys_expect_val, results_buf) w
             if is_child_1(n)
                 if !expect_val || klen < length(key)
                     slot1_requested = true
+                    results_buf[i] = (klen, PayloadRef{V,A}(0x2, nothing, into_child(n.slot1)))
                 end
             else
                 if expect_val && klen == length(key)
                     slot1_requested = true
+                    results_buf[i] = (klen, PayloadRef{V,A}(0x1, Ref{V}(into_val(n.slot1)), nothing))
                 end
             end
         end
@@ -1732,9 +1736,43 @@ function drop_head_dyn!(self::LineListNode{V,A}, byte_cnt::Int) where {V,A}
     end
 end
 
+"""
+    _lln_payload_ref(n, slot) → PayloadRef{V,A}
+
+Returns a `PayloadRef` for slot `slot` (0 or 1) of `n`.
+Ports `unsafe { self.payload_in_slot::<SLOT>() }` in upstream.
+"""
+function _lln_payload_ref(n::LineListNode{V,A}, slot::Int) where {V,A}
+    if _lln_is_child(n, slot)
+        child_rc = into_child(slot == 0 ? n.slot0 : n.slot1)
+        PayloadRef{V,A}(0x2, nothing, child_rc)
+    elseif _lln_is_val(n, slot)
+        val = into_val(slot == 0 ? n.slot0 : n.slot1)
+        PayloadRef{V,A}(0x1, Ref{V}(val), nothing)
+    else
+        PayloadRef{V,A}()
+    end
+end
+
 function pmeet_dyn(self::LineListNode{V,A}, other::AbstractTrieNode{V,A}) where {V,A}
     node_is_empty(self) && return AlgResNone()
-    error("LineListNode::pmeet_dyn — pmeet_generic not yet ported (requires all node types)")
+    sc = used_slot_count(self)
+    sc == 0 && return AlgResNone()
+
+    self_payloads = if sc == 1
+        [(copy(self.key0), _lln_payload_ref(self, 0))]
+    else
+        [(copy(self.key0), _lln_payload_ref(self, 0)),
+         (copy(self.key1), _lln_payload_ref(self, 1))]
+    end
+
+    pmeet_generic(self_payloads, other, function(payloads)
+        p0 = sc >= 1 ? payloads[1] : nothing
+        p1 = sc >= 2 ? payloads[2] : nothing
+        new_n = clone_with_updated_payloads(self, p0, p1)
+        @assert new_n !== nothing "pmeet_dyn merge_f: all payloads None (should have been AlgResNone)"
+        TrieNodeODRc(new_n, self.alloc)
+    end)
 end
 
 function psubtract_dyn(self::LineListNode{V,A}, other::AbstractTrieNode{V,A}) where {V,A}

@@ -1050,24 +1050,63 @@ end
 function node_get_payloads(n::AbstractByteNode{V,A},
                             keys_expect_val,
                             results_buf) where {V,A}
-    # Track which bytes in the mask were covered by key queries.
-    unrequested = n.mask
+    # See upstream dense_byte_node.rs for the state-machine rationale:
+    # CoFree entries can have both rec (child) and val; a rec request must
+    # precede a val request for the same byte, so the val is stashed until
+    # the next (val) request for that byte arrives.
+    unrequested_cofree_half = false
+    stashed_val = nothing   # Union{Nothing, V}
+    last_byte   = nothing   # Union{Nothing, UInt8}
+    requested_mask = copy(n.mask)
 
-    for (key, expect_val) in keys_expect_val
+    for (i, (key, expect_val)) in enumerate(keys_expect_val)
         isempty(key) && continue
         byte = key[1]
-        !test_bit(n.mask, byte) && continue
+
+        # Moving to a different byte — abandon any stashed val
+        if last_byte !== nothing && byte != last_byte
+            if stashed_val !== nothing
+                unrequested_cofree_half = true
+            end
+            stashed_val = nothing
+            last_byte   = nothing
+        end
+
+        # Serve stashed val if this is the matching val request
+        if stashed_val !== nothing
+            if length(key) == 1 && expect_val
+                results_buf[i] = (1, PayloadRef{V,A}(0x1, Ref{V}(stashed_val), nothing))
+                stashed_val = nothing
+                continue
+            end
+        end
+
+        # Mark this byte as queried (clear from requested_mask)
+        requested_mask = unset(requested_mask, byte)
         cf = _bn_get(n, byte)
         cf === nothing && continue
 
+        # Fill child result for rec requests
         if length(key) > 1 || !expect_val
-            cf.rec !== nothing && (unrequested = unset(unrequested, byte))
-        else  # length(key) == 1 && expect_val
-            cf.val !== nothing && (unrequested = unset(unrequested, byte))
+            if cf.rec !== nothing
+                results_buf[i] = (1, PayloadRef{V,A}(0x2, nothing, cf.rec))
+            end
+        end
+
+        # Fill or stash val
+        if cf.val !== nothing
+            if length(key) == 1 && expect_val
+                results_buf[i] = (1, PayloadRef{V,A}(0x1, Ref{V}(cf.val), nothing))
+            else
+                if last_byte === nothing
+                    stashed_val = cf.val
+                    last_byte   = byte
+                end
+            end
         end
     end
 
-    is_empty_mask(unrequested)
+    !unrequested_cofree_half && stashed_val === nothing && is_empty_mask(requested_mask)
 end
 
 function node_contains_val(n::AbstractByteNode, key::AbstractVector{UInt8})
