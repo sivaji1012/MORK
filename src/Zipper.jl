@@ -644,12 +644,6 @@ function val_count(m::PathMap{V,A}) where {V,A}
     m.root === nothing ? rv : val_count_below_root(_fnode(_rc_inner(m.root), V, A)) + rv
 end
 
-# ---- write stubs ----
-
-function set_val_at!(m::PathMap, path, val)
-    error("PathMap::set_val_at! — write zipper not yet ported (Phase 1c)")
-end
-
 # =====================================================================
 # Exports
 # =====================================================================
@@ -666,4 +660,4 @@ export zipper_descend_until!
 export zipper_ascend!, zipper_ascend_byte!
 export zipper_ascend_until!, zipper_ascend_until_branch!
 export zipper_to_next_val!
-export PathMap, read_zipper, read_zipper_at_path, get_val_at, path_exists_at, val_count
+export PathMap, _ensure_root!, read_zipper, read_zipper_at_path, get_val_at, path_exists_at, val_count

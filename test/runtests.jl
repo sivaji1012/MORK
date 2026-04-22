@@ -1640,4 +1640,175 @@ using MORK
             @test !path_exists_at(m, collect(UInt8, "no"))
         end
     end
+
+    @testset "WriteZipper and PathMap write API (ports pathmap/src/write_zipper.rs)" begin
+        V = Int; A = GlobalAlloc; alloc = GlobalAlloc()
+
+        # ------------------------------------------------------------------
+        # write_zipper construction
+        # ------------------------------------------------------------------
+        @testset "write_zipper — construction at root" begin
+            m = PathMap{V}()
+            z = write_zipper(m)
+            @test z isa WriteZipperCore{V,GlobalAlloc}
+            @test length(z.focus_stack) == 1
+            @test isempty(z.prefix_buf)
+            @test isempty(z.prefix_idx)
+            @test _wz_at_root(z)
+        end
+
+        # ------------------------------------------------------------------
+        # set root val (at_root path of wz_set_val!)
+        # ------------------------------------------------------------------
+        @testset "wz_set_val! at root → root_val" begin
+            m = PathMap{V}()
+            z = write_zipper(m)
+            old = wz_set_val!(z, 42)
+            @test old === nothing
+            @test m.root_val == 42
+
+            # second set returns old value
+            z2 = write_zipper(m)
+            old2 = wz_set_val!(z2, 99)
+            @test old2 == 42
+            @test m.root_val == 99
+        end
+
+        # ------------------------------------------------------------------
+        # set_val_at! and get_val_at roundtrip
+        # ------------------------------------------------------------------
+        @testset "set_val_at! / get_val_at roundtrip" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "hello"), 1)
+            @test get_val_at(m, collect(UInt8, "hello")) == 1
+
+            set_val_at!(m, collect(UInt8, "world"), 2)
+            @test get_val_at(m, collect(UInt8, "world")) == 2
+
+            # original key still present
+            @test get_val_at(m, collect(UInt8, "hello")) == 1
+
+            # missing key → nothing
+            @test get_val_at(m, collect(UInt8, "xyz")) === nothing
+        end
+
+        # ------------------------------------------------------------------
+        # val_count after writes
+        # ------------------------------------------------------------------
+        @testset "val_count after multiple set_val_at!" begin
+            m = PathMap{V}()
+            @test val_count(m) == 0
+
+            set_val_at!(m, collect(UInt8, "a"), 10)
+            @test val_count(m) == 1
+
+            set_val_at!(m, collect(UInt8, "b"), 20)
+            @test val_count(m) == 2
+
+            set_val_at!(m, collect(UInt8, "c"), 30)
+            @test val_count(m) == 3
+        end
+
+        # ------------------------------------------------------------------
+        # Overwrite (set returns old value)
+        # ------------------------------------------------------------------
+        @testset "set_val_at! overwrite returns old value" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "key"), 111)
+            old = set_val_at!(m, collect(UInt8, "key"), 222)
+            @test old == 111
+            @test get_val_at(m, collect(UInt8, "key")) == 222
+            @test val_count(m) == 1
+        end
+
+        # ------------------------------------------------------------------
+        # Node upgrade path: > 2 distinct entries forces LineListNode → DenseByteNode
+        # ------------------------------------------------------------------
+        @testset "node upgrade (LineListNode → DenseByteNode) via set_val_at!" begin
+            m = PathMap{V}()
+            # LineListNode has 2 slots; a third unique entry triggers upgrade
+            set_val_at!(m, UInt8[1], 100)
+            set_val_at!(m, UInt8[2], 200)
+            set_val_at!(m, UInt8[3], 300)   # triggers upgrade
+            @test val_count(m) == 3
+            @test get_val_at(m, UInt8[1]) == 100
+            @test get_val_at(m, UInt8[2]) == 200
+            @test get_val_at(m, UInt8[3]) == 300
+        end
+
+        # ------------------------------------------------------------------
+        # remove_val_at!
+        # ------------------------------------------------------------------
+        @testset "remove_val_at!" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "foo"), 7)
+            set_val_at!(m, collect(UInt8, "bar"), 8)
+            @test val_count(m) == 2
+
+            removed = remove_val_at!(m, collect(UInt8, "foo"))
+            @test removed == 7
+            @test get_val_at(m, collect(UInt8, "foo")) === nothing
+            @test get_val_at(m, collect(UInt8, "bar")) == 8
+            @test val_count(m) == 1
+        end
+
+        # ------------------------------------------------------------------
+        # remove_val_at! on missing path returns nothing
+        # ------------------------------------------------------------------
+        @testset "remove_val_at! missing path" begin
+            m = PathMap{V}()
+            @test remove_val_at!(m, collect(UInt8, "nope")) === nothing
+        end
+
+        # ------------------------------------------------------------------
+        # wz_path_exists / wz_is_val / wz_get_val
+        # ------------------------------------------------------------------
+        @testset "wz_path_exists / wz_is_val / wz_get_val" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "abc"), 55)
+
+            z = write_zipper(m)
+            wz_descend_to!(z, collect(UInt8, "abc"))
+            @test wz_path_exists(z)
+            @test wz_is_val(z)
+            @test wz_get_val(z) == 55
+
+            z2 = write_zipper(m)
+            wz_descend_to!(z2, collect(UInt8, "xyz"))
+            @test !wz_path_exists(z2)
+            @test !wz_is_val(z2)
+            @test wz_get_val(z2) === nothing
+        end
+
+        # ------------------------------------------------------------------
+        # write_zipper_at_path
+        # ------------------------------------------------------------------
+        @testset "write_zipper_at_path" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "prefix:data"), 99)
+
+            # create zipper pre-positioned at "prefix:" then set a second value
+            z = write_zipper_at_path(m, collect(UInt8, "prefix:"))
+            wz_descend_to!(z, collect(UInt8, "more"))
+            wz_set_val!(z, 77)
+            @test get_val_at(m, collect(UInt8, "prefix:data")) == 99
+            @test get_val_at(m, collect(UInt8, "prefix:more")) == 77
+        end
+
+        # ------------------------------------------------------------------
+        # PathMap.isempty changes after write/remove
+        # ------------------------------------------------------------------
+        @testset "PathMap isempty semantics with writes" begin
+            m = PathMap{V}()
+            @test isempty(m)
+
+            set_val_at!(m, collect(UInt8, "x"), 1)
+            @test !isempty(m)
+
+            remove_val_at!(m, collect(UInt8, "x"))
+            # After removal the map still has the root node (not empty)
+            # val_count should be 0
+            @test val_count(m) == 0
+        end
+    end
 end

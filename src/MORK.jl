@@ -61,6 +61,10 @@ include("nodes/DenseByteNode.jl")
 # Ports pathmap/src/zipper.rs (read-only surface) + pathmap/src/trie_map.rs.
 include("Zipper.jl")
 
+# Write zipper (mutable cursor) — set_val!, remove_val!, navigation.
+# Ports pathmap/src/write_zipper.rs (write surface).  Phase 1c.
+include("WriteZipper.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """

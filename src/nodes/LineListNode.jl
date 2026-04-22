@@ -679,8 +679,34 @@ function set_payload_abstract!(n::LineListNode{V,A}, is_child::Bool,
         end
     end
 
-    # Both slots full and no useful overlap → upgrade to DenseByteNode
-    SetPayloadUpgrade{V,A}(_convert_to_dense_stub!(n, 3))
+    # Both slots full and no useful overlap → upgrade to DenseByteNode.
+    # The upgrade node must include the NEW (key, payload) entry, mirroring
+    # Rust's set_payload_abstract upgrade block (line_list_node.rs:1013-1040).
+    dense_rc   = _convert_to_dense_stub!(n, 3)
+    dense_node = as_tagged(dense_rc)::DenseByteNode{V,A}
+    k0 = key[1]
+    if length(key) > 1
+        # Wrap the tail in a new LineListNode child
+        child = LineListNode{V,A}(n.alloc)
+        sub_key = key[2:end]
+        if is_child
+            inner_rc = into_child(payload)
+            node_set_branch!(child, sub_key, inner_rc)
+        else
+            val = into_val(payload)
+            r = node_set_val!(child, sub_key, val)
+            @assert !(r isa TrieNodeODRc) "unexpected upgrade in fresh LineListNode"
+        end
+        _bn_set_child!(dense_node, k0, TrieNodeODRc(child, n.alloc))
+    else
+        # Single-byte key: insert directly into DenseByteNode
+        if is_child
+            _bn_set_child!(dense_node, k0, into_child(payload))
+        else
+            _bn_set_val!(dense_node, k0, into_val(payload))
+        end
+    end
+    SetPayloadUpgrade{V,A}(dense_rc)
 end
 
 # =====================================================================
@@ -993,11 +1019,12 @@ function node_val_count(n::LineListNode, cache)
     is_value_1(n) && (result += 1)
     if is_child_0(n)
         child_rc = into_child(n.slot0)
-        result += node_val_count(as_tagged(child_rc), cache)
+        # skip empty-sentinel children (node == nothing means TrieNodeODRc::new_empty)
+        !is_empty_node(child_rc) && (result += node_val_count(as_tagged(child_rc), cache))
     end
     if is_child_1(n)
         child_rc = into_child(n.slot1)
-        result += node_val_count(as_tagged(child_rc), cache)
+        !is_empty_node(child_rc) && (result += node_val_count(as_tagged(child_rc), cache))
     end
     result
 end
