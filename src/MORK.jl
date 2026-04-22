@@ -65,6 +65,10 @@ include("Zipper.jl")
 # Ports pathmap/src/write_zipper.rs (write surface).  Phase 1c.
 include("WriteZipper.jl")
 
+# Lightweight read-only reference to a trie location (TrieRefBorrowed/Owned/TrieRef).
+# Ports pathmap/src/trie_ref.rs.
+include("TrieRef.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """

@@ -2018,5 +2018,112 @@ using MORK
             # val_count should be 0
             @test val_count(m) == 0
         end
+
+        # ==================================================================
+        # TrieRef tests (mirrors trie_ref_test1 + trie_ref_test2 in upstream)
+        # ==================================================================
+
+        @testset "TrieRef — basic path_exists / val / child_count (trie_ref_test1)" begin
+            keys = ["Hello", "Hell", "Help", "Helsinki"]
+            m = PathMap{Nothing}()
+            for k in keys
+                set_val_at!(m, collect(UInt8, k), nothing)
+            end
+
+            # Partial path "He" — exists, no val
+            tr = trie_ref_at_path(m, collect(UInt8, "He"))
+            @test tr_path_exists(tr)
+            @test tr_get_val(tr) === nothing
+
+            # "Hel" — exists, no val, child node
+            tr = trie_ref_at_path(m, collect(UInt8, "Hel"))
+            @test tr_path_exists(tr)
+            @test tr_get_val(tr) === nothing
+
+            # "Help" — leaf val
+            tr = trie_ref_at_path(m, collect(UInt8, "Help"))
+            @test tr_path_exists(tr)
+            @test tr_get_val(tr) === nothing   # val IS nothing (stored nothing)
+            @test tr_is_val(tr) == false        # nothing val → false
+
+            # "Hello" — leaf val
+            tr = trie_ref_at_path(m, collect(UInt8, "Hello"))
+            @test tr_path_exists(tr)
+
+            # Non-existent path
+            tr = trie_ref_at_path(m, collect(UInt8, "Hi"))
+            @test !tr_path_exists(tr)
+            @test tr_get_val(tr) === nothing
+
+            # Very long path (> MAX_NODE_KEY_BYTES bytes) that doesn't exist
+            long_path = collect(UInt8, "Hello Mr. Washington, my name is John, but sometimes people call me Jack.  I live in Springfield.")
+            tr = trie_ref_at_path(m, long_path)
+            @test !tr_path_exists(tr)
+            @test tr_child_count(tr) == 0
+        end
+
+        @testset "TrieRef — child_count / child_mask at 'H'" begin
+            keys = ["Hello", "Hell", "Help", "Helsinki"]
+            m = PathMap{Nothing}()
+            for k in keys; set_val_at!(m, collect(UInt8, k), nothing); end
+
+            tr0 = trie_ref_at_path(m, collect(UInt8, "H"))
+            @test tr_path_exists(tr0)
+            @test tr_child_count(tr0) == 1   # only 'e' branch
+
+            tr1 = tr_trie_ref_at_path(tr0, collect(UInt8, "el"))
+            @test tr_path_exists(tr1)
+            @test tr_child_count(tr1) == 3   # 'l', 'p', 's' (Hell, Help, Helsinki)
+
+            # Descend to "Hello"
+            tr2 = tr_trie_ref_at_path(tr1, collect(UInt8, "lo"))
+            @test tr_path_exists(tr2)
+            @test tr_child_count(tr2) == 0
+
+            # Beyond "Hello" — invalid path
+            tr3 = tr_trie_ref_at_path(tr2, collect(UInt8, "Operator"))
+            @test !tr_path_exists(tr3)
+            @test tr_child_count(tr3) == 0
+
+            # Further beyond — chained invalid
+            tr4 = tr_trie_ref_at_path(tr3, collect(UInt8, ", give me number 9"))
+            @test !tr_path_exists(tr4)
+        end
+
+        @testset "TrieRef — trie_ref_test2: val_count + fork_read_zipper + make_map" begin
+            rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus^", "romulus",
+                  "rubens", "ruber", "rubicon", "rubicundus", "rom'i"]
+            m = PathMap{Int}()
+            for (i, r) in enumerate(rs)
+                set_val_at!(m, collect(UInt8, r), i)
+            end
+
+            # Root: 4 first-byte branches (a, b, c, r)
+            tr = trie_ref_at_path(m, UInt8[])
+            @test tr_path_exists(tr)
+            @test tr_child_count(tr) == 4
+
+            # Under 'a'
+            tr = tr_trie_ref_at_path(tr, [UInt8('a')])
+            @test tr_path_exists(tr)
+            @test tr_child_count(tr) == 1
+
+            # Under 'r' — 9 values (roman*, rubens, ruber, rubicon, rubicundus)
+            tr_r = trie_ref_at_path(m, [UInt8('r')])
+            z = tr_fork_read_zipper(tr_r)
+            @test zipper_val_count(z) == 9
+
+            # make_map snapshot
+            new_map = tr_make_map(tr_r)
+            @test val_count(new_map) == 9
+        end
+
+        @testset "TrieRef — invalid TrieRef returns false/nothing/0" begin
+            t = _tr_new_invalid(Int)
+            @test !_tr_is_valid(t)
+            @test !tr_path_exists(t)
+            @test tr_get_val(t) === nothing
+            @test tr_child_count(t) == 0
+        end
     end
 end
