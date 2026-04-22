@@ -51,7 +51,7 @@ function node_get_val_mut(::EmptyNode{V}, ::AbstractVector{UInt8}) where V
     nothing
 end
 
-function node_set_val!(::EmptyNode, ::AbstractVector{UInt8}, ::Any)
+function node_set_val!(::EmptyNode{V,A}, ::AbstractVector{UInt8}, ::V) where {V,A}
     error("EmptyNode::node_set_val! — unreachable (should be headed off upstream)")
 end
 
@@ -87,7 +87,7 @@ function next_items(::EmptyNode{V,A}, ::UInt128) where {V,A}
     (NODE_ITER_FINISHED, UInt8[], nothing, nothing)
 end
 
-node_val_count(::EmptyNode, ::Any) = 0
+node_val_count(::EmptyNode, ::Dict{UInt64,Int}) = 0
 node_goat_val_count(::EmptyNode) = 0
 
 function node_child_iter_start(::EmptyNode{V,A}) where {V,A}

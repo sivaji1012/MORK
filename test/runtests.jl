@@ -713,7 +713,7 @@ using MORK
             @test node_contains_val(e, key) == false
             @test node_get_val(e, key) === nothing
             @test node_get_val_mut(e, key) === nothing
-            @test node_val_count(e, nothing) == 0
+            @test node_val_count(e, Dict{UInt64,Int}()) == 0
             @test node_goat_val_count(e) == 0
             @test count_branches(e, key) == 0
             @test prior_branch_key(e, key) == UInt8[]

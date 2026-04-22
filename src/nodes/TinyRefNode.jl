@@ -163,7 +163,7 @@ iter_token_for_path(::TinyRefNode, ::AbstractVector{UInt8}) =
     error("TinyRefNode::iter_token_for_path — unreachable")
 next_items(::TinyRefNode, ::UInt128) = error("TinyRefNode::next_items — unreachable")
 
-function node_val_count(t::TinyRefNode, cache)
+function node_val_count(t::TinyRefNode, cache::Dict{UInt64,Int})
     node_val_count(into_full(t), cache)
 end
 

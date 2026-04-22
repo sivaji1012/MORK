@@ -13,11 +13,9 @@ Write zipper (`write_zipper.rs`), zipper head, and exotic zippers
 (ProductZipper, OverlayZipper, etc.) are deferred to Phase 1c.
 
 Design note — inner-node storage (TaggedNodeRef analogue):
-  Upstream stores `TaggedNodeRef` (raw ptr) in focus_node and ancestors.
-  In Julia, `AbstractTrieNode` instances are GC-managed; storing them as
-  `Any` in focus_node / ancestors is safe and avoids inflating the MORK
-  refcount. The root_node TrieNodeODRc is kept as an anchor to ensure
-  the root sub-trie stays reachable.
+  Upstream stores `TaggedNodeRef<'a, V, A>` (typed raw ptr) in focus_node and ancestors.
+  Julia equivalent: `Union{Nothing, AbstractTrieNode{V,A}}` where `nothing` = EmptyNode sentinel.
+  The root_node TrieNodeODRc is kept as an anchor to ensure the root sub-trie stays reachable.
 """
 
 # =====================================================================
@@ -31,9 +29,8 @@ const EXPECTED_PATH_LEN = 64
 # _fnode — EmptyNode-safe inner-node accessor
 # =====================================================================
 #
-# Upstream: `TaggedNodeRef<'a, V, A>` — a raw reference to the concrete node.
-# Julia: `focus_node::Any` stores the `AbstractTrieNode{V,A}` (inner node).
-# `nothing` means EmptyNode (matches `is_empty_node(rc)` semantics).
+# Upstream: `TaggedNodeRef<'a, V, A>` — a typed raw reference to the concrete node.
+# Julia: `Union{Nothing, AbstractTrieNode{V,A}}` — `nothing` = EmptyNode sentinel.
 
 @inline function _fnode(inner, ::Type{V}, ::Type{A}) where {V, A<:Allocator}
     inner === nothing ? EmptyNode{V,A}() : inner
@@ -113,18 +110,19 @@ end
 Read-only cursor into a `PathMap`-like trie.  Corresponds to both
 `ReadZipperCore` and `ReadZipperUntracked` in upstream.
 
-focus_node and ancestors store inner `AbstractTrieNode` values (like
-upstream's `TaggedNodeRef`), NOT `TrieNodeODRc` wrappers.
+focus_node and ancestors store `Union{Nothing,AbstractTrieNode{V,A}}` —
+the Julia equivalent of upstream's `TaggedNodeRef<'a,V,A>` typed ref.
+`nothing` is the EmptyNode sentinel. NOT `TrieNodeODRc` wrappers.
 """
 mutable struct ReadZipperCore{V, A<:Allocator}
     root_key_start  ::Int               # 0-indexed: prefix_buf[root_key_start+1:] = root key
     root_val        ::Union{Nothing, V} # value at the zipper root (if any)
     root_node       ::TrieNodeODRc{V,A} # anchor Rc — keeps root sub-trie alive
-    focus_node      ::Any               # inner AbstractTrieNode{V,A} (or nothing=EmptyNode)
+    focus_node      ::Union{Nothing, AbstractTrieNode{V,A}}  # nothing = EmptyNode sentinel (TaggedNodeRef<V,A>)
     focus_iter_token::UInt128           # iteration token (NODE_ITER_INVALID = unstarted)
     prefix_buf      ::Vector{UInt8}     # full path buffer: origin_path ++ relative_path
     origin_path_len ::Int               # length of initial path prefix embedded in prefix_buf
-    ancestors       ::Vector{Tuple{Any, UInt128, Int}} # (inner_node, iter_tok, key_offset_0)
+    ancestors       ::Vector{Tuple{Union{Nothing,AbstractTrieNode{V,A}}, UInt128, Int}} # (TaggedNodeRef, iter_tok, key_offset_0)
     alloc           ::A
 end
 
@@ -149,7 +147,7 @@ function ReadZipperCore(root_rc::TrieNodeODRc{V,A},
         NODE_ITER_INVALID,
         Vector{UInt8}(path),
         length(path),                               # origin_path_len
-        Tuple{Any, UInt128, Int}[],
+        Tuple{Union{Nothing,AbstractTrieNode{V,A}}, UInt128, Int}[],
         alloc,
     )
 end

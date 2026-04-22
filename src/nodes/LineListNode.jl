@@ -1017,7 +1017,7 @@ end
 # node_val_count / node_goat_val_count
 # =====================================================================
 
-function node_val_count(n::LineListNode, cache)
+function node_val_count(n::LineListNode, cache::Dict{UInt64,Int})
     result = 0
     is_value_0(n) && (result += 1)
     is_value_1(n) && (result += 1)
