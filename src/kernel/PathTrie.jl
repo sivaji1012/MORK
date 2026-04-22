@@ -481,6 +481,244 @@ function reset!(z::AnyZipper)
     return z
 end
 
+# ============================================================================
+# Phase 1b — full movement API
+# ============================================================================
+#
+# All of upstream's remaining `ZipperMoving` trait methods:
+#   - Stepping:  descend_first_byte!, descend_indexed_byte!
+#   - Jumping:   descend_to_existing!, descend_to_val!, descend_until!,
+#                ascend_until!, ascend_until_branch!
+#   - Siblings:  to_next_sibling_byte!, to_prev_sibling_byte!
+
+# --- Small helpers on the focus node ---
+
+@inline _focus_node(z::AnyZipper) = @inbounds z.trie.arena[focus(z)]
+
+# Return child bytes sorted ascending. O(n) scan + O(n log n) sort.
+# Phase 1a uses Dict which doesn't preserve order; a future sorted-vector
+# or bitmask child representation would make this O(n).
+@inline function _sorted_child_bytes(node::TrieNode)::Vector{UInt8}
+    bytes = collect(keys(node.children))
+    sort!(bytes)
+    return bytes
+end
+
+# --- Stepping ---
+
+"""
+    descend_first_byte!(z) -> Bool
+
+Descend to the smallest-valued child byte. Returns `false` if the focus
+has no children (focus unchanged). Port of upstream
+`ZipperMoving::descend_first_byte`.
+"""
+function descend_first_byte!(z::AnyZipper)::Bool
+    node = _focus_node(z)
+    isempty(node.children) && return false
+    # Find minimum byte — O(n) single pass
+    min_b = typemax(UInt8)
+    @inbounds for b in keys(node.children)
+        b < min_b && (min_b = b)
+    end
+    return descend_to_byte!(z, min_b)
+end
+
+"""
+    descend_indexed_byte!(z, i::Int) -> Bool
+
+Descend to the i-th child in ascending byte order (1-based — Julia
+convention; upstream is 0-based — document divergence). Returns
+`false` if `i` is out of range. Port of upstream
+`ZipperMoving::descend_indexed_byte`.
+"""
+function descend_indexed_byte!(z::AnyZipper, i::Int)::Bool
+    node = _focus_node(z)
+    (i < 1 || i > length(node.children)) && return false
+    bytes = _sorted_child_bytes(node)
+    return descend_to_byte!(z, bytes[i])
+end
+
+# --- Jumping (partial-success variants) ---
+
+"""
+    descend_to_existing!(z, path::AbstractVector{UInt8}) -> Int
+
+Walk `path` as far as the trie allows, stopping at the first missing byte.
+Returns the number of bytes successfully consumed (0 if the first byte
+is absent, `length(path)` on full success). Unlike `descend_to!`, this
+commits partial walks. Port of upstream
+`ZipperMoving::descend_to_existing`.
+"""
+function descend_to_existing!(z::AnyZipper, path::AbstractVector{UInt8})::Int
+    consumed = 0
+    @inbounds for b in path
+        node = _focus_node(z)
+        child_idx = get(node.children, b, UInt32(0))
+        child_idx == UInt32(0) && break
+        push!(z.stack, child_idx)
+        push!(z.labels, b)
+        consumed += 1
+    end
+    return consumed
+end
+
+"""
+    descend_to_val!(z, path::AbstractVector{UInt8}) -> Int
+
+Like `descend_to_existing!` but also stops as soon as the focus reaches
+a node that has a stored value. Returns bytes consumed. Useful for
+walking toward the furthest value-bearing path. Port of upstream
+`ZipperMoving::descend_to_val`.
+"""
+function descend_to_val!(z::AnyZipper, path::AbstractVector{UInt8})::Int
+    consumed = 0
+    # If the zipper already sits on a value before descending, stop immediately.
+    is_val(z) && return 0
+    @inbounds for b in path
+        node = _focus_node(z)
+        child_idx = get(node.children, b, UInt32(0))
+        child_idx == UInt32(0) && break
+        push!(z.stack, child_idx)
+        push!(z.labels, b)
+        consumed += 1
+        # Stop AT the newly-focused node if it has a value
+        is_val(z) && break
+    end
+    return consumed
+end
+
+"""
+    descend_until!(z) -> Int
+
+Descend along the single-child chain from the current focus until
+reaching a node that either:
+  - has a value
+  - has multiple children (branch point)
+  - has zero children (leaf)
+
+Returns the number of bytes descended (0 if focus already sits at
+such a stopping point). Port of upstream `ZipperMoving::descend_until`.
+
+Efficient for skipping past single-child corridors during traversal.
+"""
+function descend_until!(z::AnyZipper)::Int
+    consumed = 0
+    while true
+        node = _focus_node(z)
+        # Stop if focus has a value, 0 children, or > 1 children
+        (node.value !== nothing) && break
+        n = length(node.children)
+        n != 1 && break
+        # Exactly one child — descend
+        only_byte = first(keys(node.children))
+        child_idx = node.children[only_byte]
+        push!(z.stack, child_idx)
+        push!(z.labels, only_byte)
+        consumed += 1
+    end
+    return consumed
+end
+
+"""
+    ascend_until!(z) -> Int
+
+Ascend until reaching zipper origin OR a node with multiple children
+OR a node with a value. Returns the number of bytes ascended.
+Port of upstream `ZipperMoving::ascend_until`.
+"""
+function ascend_until!(z::AnyZipper)::Int
+    consumed = 0
+    while !at_root(z)
+        # Pop one level, then check if the NEW focus is a stopping point
+        pop!(z.stack)
+        pop!(z.labels)
+        consumed += 1
+        node = _focus_node(z)
+        (node.value !== nothing) && break
+        length(node.children) > 1 && break
+    end
+    return consumed
+end
+
+"""
+    ascend_until_branch!(z) -> Int
+
+Ascend until reaching zipper origin OR a node with multiple children.
+Unlike `ascend_until!`, does NOT stop at value-bearing nodes — only at
+true branch points or origin. Port of upstream
+`ZipperMoving::ascend_until_branch`.
+"""
+function ascend_until_branch!(z::AnyZipper)::Int
+    consumed = 0
+    while !at_root(z)
+        pop!(z.stack)
+        pop!(z.labels)
+        consumed += 1
+        length(_focus_node(z).children) > 1 && break
+    end
+    return consumed
+end
+
+# --- Sibling navigation ---
+
+"""
+    to_next_sibling_byte!(z) -> Bool
+
+Move laterally to the next sibling (smallest child byte of the parent
+strictly greater than the label that brought us here). Returns `false`
+if there is no next sibling (focus unchanged). Port of upstream
+`ZipperMoving::to_next_sibling_byte`.
+
+At-root zippers cannot have siblings (no parent), so they always return false.
+"""
+function to_next_sibling_byte!(z::AnyZipper)::Bool
+    at_root(z) && return false
+    last_byte = @inbounds z.labels[end]
+    parent_idx = @inbounds z.stack[end - 1]
+    parent = z.trie.arena[parent_idx]
+    # Find smallest byte > last_byte among parent.children
+    next_byte = nothing
+    next_child = UInt32(0)
+    @inbounds for (b, idx) in parent.children
+        if b > last_byte && (next_byte === nothing || b < next_byte)
+            next_byte = b
+            next_child = idx
+        end
+    end
+    next_byte === nothing && return false
+    @inbounds z.stack[end] = next_child
+    @inbounds z.labels[end] = next_byte
+    return true
+end
+
+"""
+    to_prev_sibling_byte!(z) -> Bool
+
+Move laterally to the previous sibling (largest child byte of the
+parent strictly less than the label that brought us here). Returns
+`false` if there is no previous sibling. Port of upstream
+`ZipperMoving::to_prev_sibling_byte`.
+"""
+function to_prev_sibling_byte!(z::AnyZipper)::Bool
+    at_root(z) && return false
+    last_byte = @inbounds z.labels[end]
+    parent_idx = @inbounds z.stack[end - 1]
+    parent = z.trie.arena[parent_idx]
+    prev_byte = nothing
+    prev_child = UInt32(0)
+    @inbounds for (b, idx) in parent.children
+        if b < last_byte && (prev_byte === nothing || b > prev_byte)
+            prev_byte = b
+            prev_child = idx
+        end
+    end
+    prev_byte === nothing && return false
+    @inbounds z.stack[end] = prev_child
+    @inbounds z.labels[end] = prev_byte
+    return true
+end
+
 # --- WriteZipper-only mutation ---
 
 """
@@ -548,4 +786,8 @@ export path_exists_at, create_path!, prune_path!
 export focus, at_root, is_val, val, child_count, child_mask
 export path, origin_path, root_prefix_path
 export descend_to_byte!, descend_to!, ascend!, ascend_byte!, reset!
+export descend_first_byte!, descend_indexed_byte!
+export descend_to_existing!, descend_to_val!
+export descend_until!, ascend_until!, ascend_until_branch!
+export to_next_sibling_byte!, to_prev_sibling_byte!
 export set_val!, remove_val!
