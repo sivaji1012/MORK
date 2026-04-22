@@ -817,5 +817,226 @@ using MORK
             e = EmptyNode{Int, GlobalAlloc}()
             @test node_remove_unmasked_branches!(e, UInt8[], ByteMask(), false) === nothing
         end
+
+        # ================================================================
+        # LineListNode tests
+        # ================================================================
+
+        @testset "LineListNode — empty node" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            @test node_is_empty(n)
+            @test node_tag(n) == LINE_LIST_NODE_TAG
+            @test !is_used_0(n) && !is_used_1(n)
+            @test key_len_0(n) == 0 && key_len_1(n) == 0
+            @test used_slot_count(n) == 0
+            @test node_contains_val(n, UInt8[1,2,3]) == false
+            @test node_get_val(n, UInt8[1,2,3]) === nothing
+            @test node_get_child(n, UInt8[1]) === nothing
+        end
+
+        @testset "LineListNode — single value in slot0" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            key = collect(UInt8, "hello")
+            res = node_set_val!(n, key, 42)
+            @test res isa Tuple
+            @test res[1] === nothing    # no previous value
+            @test res[2] == false       # no continuation node
+            @test !node_is_empty(n)
+            @test is_used_0(n) && !is_used_1(n)
+            @test node_contains_val(n, key) == true
+            @test node_get_val(n, key) == 42
+            @test node_contains_val(n, collect(UInt8, "world")) == false
+        end
+
+        @testset "LineListNode — replace value in slot0" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            key = collect(UInt8, "hello")
+            node_set_val!(n, key, 42)
+            res2 = node_set_val!(n, key, 99)
+            @test res2 isa Tuple
+            @test res2[1] == 42         # returned old value
+            @test node_get_val(n, key) == 99
+        end
+
+        @testset "LineListNode — two values in separate slots" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            k1 = collect(UInt8, "goodbye")
+            k2 = collect(UInt8, "hello")
+            node_set_val!(n, k1, 24)
+            node_set_val!(n, k2, 42)
+            @test is_used_0(n) && is_used_1(n)
+            @test used_slot_count(n) == 2
+            @test node_get_val(n, k1) == 24
+            @test node_get_val(n, k2) == 42
+        end
+
+        @testset "LineListNode — slot ordering invariant" begin
+            # slot0 key < slot1 key (lexicographic)
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            # Insert in reverse alphabetical order — should still be sorted
+            node_set_val!(n, collect(UInt8, "z"), 2)
+            node_set_val!(n, collect(UInt8, "a"), 1)
+            @test n.key0 == collect(UInt8, "a")
+            @test n.key1 == collect(UInt8, "z")
+            @test validate_list_node(n)
+        end
+
+        @testset "LineListNode — node_key_overlap" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(n, collect(UInt8, "hello"), 1)
+            @test node_key_overlap(n, collect(UInt8, "help")) == 3  # hel
+            @test node_key_overlap(n, collect(UInt8, "world")) == 0
+        end
+
+        @testset "LineListNode — node_contains_partial_key" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(n, collect(UInt8, "hello"), 1)
+            @test node_contains_partial_key(n, collect(UInt8, "hel"))
+            @test node_contains_partial_key(n, collect(UInt8, "hello"))
+            @test !node_contains_partial_key(n, collect(UInt8, "world"))
+        end
+
+        @testset "LineListNode — child in slot0" begin
+            # Insert a branch (child node)
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            child = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(child, collect(UInt8, "world"), 99)
+            child_rc = TrieNodeODRc(child, GlobalAlloc())
+            res = node_set_branch!(n, collect(UInt8, "hello"), child_rc)
+            @test res === true || res === false   # created_subnode Bool
+            @test is_child_0(n)
+            result = node_get_child(n, collect(UInt8, "hello"))
+            @test result !== nothing
+            consumed, got_rc = result
+            @test consumed == 5
+            @test node_get_val(as_tagged(got_rc), collect(UInt8, "world")) == 99
+        end
+
+        @testset "LineListNode — remove_val! with prune" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            key = collect(UInt8, "hello")
+            node_set_val!(n, key, 42)
+            removed = node_remove_val!(n, key, true)
+            @test removed == 42
+            @test node_is_empty(n)
+        end
+
+        @testset "LineListNode — remove_val! two slots" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            k1 = collect(UInt8, "a")
+            k2 = collect(UInt8, "b")
+            node_set_val!(n, k1, 1)
+            node_set_val!(n, k2, 2)
+            removed = node_remove_val!(n, k1, true)
+            @test removed == 1
+            @test !is_used_1(n)
+            @test node_get_val(n, k2) == 2
+        end
+
+        @testset "LineListNode — iteration empty" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            tok, path, child, val = next_items(n, new_iter_token(n))
+            @test tok == NODE_ITER_FINISHED
+        end
+
+        @testset "LineListNode — iteration single value" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            key = collect(UInt8, "hi")
+            node_set_val!(n, key, 77)
+            tok, path, child, val = next_items(n, UInt128(0))
+            @test tok == UInt128(1)
+            @test path == key
+            @test val == 77
+            @test child === nothing
+            tok2, _, _, _ = next_items(n, tok)
+            @test tok2 == NODE_ITER_FINISHED
+        end
+
+        @testset "LineListNode — iteration two values" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(n, collect(UInt8, "a"), 1)
+            node_set_val!(n, collect(UInt8, "b"), 2)
+            tok, path, child, val = next_items(n, UInt128(0))
+            @test path == collect(UInt8, "a") && val == 1
+            tok2, path2, _, val2 = next_items(n, tok)
+            @test path2 == collect(UInt8, "b") && val2 == 2
+            tok3, _, _, _ = next_items(n, tok2)
+            @test tok3 == NODE_ITER_FINISHED
+        end
+
+        @testset "LineListNode — count_branches" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            @test count_branches(n, UInt8[]) == 0
+            node_set_val!(n, collect(UInt8, "ab"), 1)
+            node_set_val!(n, collect(UInt8, "cd"), 2)
+            @test count_branches(n, UInt8[]) == 2   # 'a' and 'c'
+            @test count_branches(n, collect(UInt8, "a")) == 1   # 'b'
+        end
+
+        @testset "LineListNode — node_branches_mask" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(n, collect(UInt8, "a"), 1)
+            node_set_val!(n, collect(UInt8, "b"), 2)
+            m = node_branches_mask(n, UInt8[])
+            @test test_bit(m, UInt8('a'))
+            @test test_bit(m, UInt8('b'))
+            @test !test_bit(m, UInt8('c'))
+        end
+
+        @testset "LineListNode — get_node_at_key zero-length" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(n, collect(UInt8, "hello"), 1)
+            ref = get_node_at_key(n, UInt8[])
+            @test ref isa ANRBorrowedDyn{Int, GlobalAlloc}
+        end
+
+        @testset "LineListNode — get_node_at_key exact child" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            child = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(child, collect(UInt8, "world"), 5)
+            child_rc = TrieNodeODRc(child, GlobalAlloc())
+            node_set_branch!(n, collect(UInt8, "key"), child_rc)
+            ref = get_node_at_key(n, collect(UInt8, "key"))
+            @test ref isa ANRBorrowedRc{Int, GlobalAlloc}
+        end
+
+        @testset "LineListNode — validate_list_node invariants" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(n, collect(UInt8, "a"), 1)
+            node_set_val!(n, collect(UInt8, "z"), 2)
+            @test validate_list_node(n)
+        end
+
+        @testset "LineListNode — long key creates continuation node" begin
+            long_key = collect(UInt8, "Pack my box with five dozen liquor jugs")
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            res = node_set_val!(n, long_key, 24)
+            @test res isa Tuple
+            created = res[2]
+            @test created == true   # continuation node was created
+            # Traverse the chain to find the value
+            remaining = long_key
+            cur = n
+            levels = 0
+            while true
+                r = node_get_child(cur, remaining)
+                r === nothing && break
+                consumed, child_rc = r
+                remaining = remaining[(consumed+1):end]
+                cur = as_tagged(child_rc)
+                levels += 1
+            end
+            @test node_get_val(cur, remaining) == 24
+            @test levels == (length(long_key) - 1) ÷ KEY_BYTES_CNT
+        end
+
+        @testset "LineListNode — pjoin_dyn with EmptyNode returns Identity(SELF)" begin
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(n, collect(UInt8, "a"), 1)
+            e = EmptyNode{Int, GlobalAlloc}()
+            res = pjoin_dyn(n, e)
+            @test res isa AlgResIdentity
+            @test res.mask == SELF_IDENT
+        end
     end
 end

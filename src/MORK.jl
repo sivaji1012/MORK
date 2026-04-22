@@ -44,6 +44,11 @@ include("nodes/TrieNode.jl")
 # Ports pathmap/src/empty_node.rs.
 include("nodes/EmptyNode.jl")
 
+# Compact 2-slot trie node. Ports pathmap/src/line_list_node.rs.
+# NOTE: lattice ops that cross-dispatch to DenseByteNode/TinyRefNode are
+# stubbed with error() until those node types are ported.
+include("nodes/LineListNode.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """
