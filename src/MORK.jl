@@ -31,19 +31,24 @@ PRIMUS-specific extension:
 """
 module MORK
 
-# --- Phase 0: no substantive modules yet ---
+# --- Phase 1a: PathTrie{V} + ReadZipper + WriteZipper ---
+include("kernel/PathTrie.jl")
+
+# Remaining Phase 1 sub-phases (will land additional includes):
+#   1b: full movement (descend_until, ascend_until, sibling nav)
+#   1c: iteration (to_next_val, to_next_step, k-path)
+#   1d: subtrie ops (graft, take_map) + structural-sharing COW
+#   1e: lattice algebra (join, meet, subtract, restrict)
+#   1f: ZipperHead exclusivity + ProductZipper
+#   1g: serialization
+#   1h: Space integration + utilities (ByteMask, Conflict, Counters)
 #
-# Subdirectories exist under src/ as placeholders. Each phase of the plan
-# adds its include chain here:
-#
-#   Phase 1 (kernel):   include("kernel/PathTrie.jl"); include("kernel/Space.jl"); …
+# Later phases add:
 #   Phase 2 (expr):     include("expr/Tag.jl"); include("expr/ExprSpan.jl"); …
 #   Phase 3 (frontend): include("frontend/SExpr.jl"); …
 #   Phase 4 (server):   include("server/Server.jl"); …
 #   Phase 5 (distr):    include("distributed/DistributedPathTrie.jl"); …
 #   Phase 6 (runtime):  include("runtime/ZipperVM.jl"); …
-#
-# Landing criterion for Phase 0: `using MORK` succeeds and test suite passes.
 
 """
     version() -> VersionNumber
