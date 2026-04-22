@@ -696,5 +696,126 @@ using MORK
             @test !is_none(owned)
             @test borrow(owned) === rc
         end
+
+        @testset "EmptyNode — struct and tag" begin
+            e = EmptyNode{Int, GlobalAlloc}()
+            @test node_tag(e) == EMPTY_NODE_TAG
+            @test node_is_empty(e)
+        end
+
+        @testset "EmptyNode — query methods return trivial values" begin
+            e = EmptyNode{Int, GlobalAlloc}()
+            key = UInt8[1, 2, 3]
+            @test node_key_overlap(e, key) == 0
+            @test node_contains_partial_key(e, key) == false
+            @test node_get_child(e, key) === nothing
+            @test node_get_child_mut(e, key) === nothing
+            @test node_contains_val(e, key) == false
+            @test node_get_val(e, key) === nothing
+            @test node_get_val_mut(e, key) === nothing
+            @test node_val_count(e, nothing) == 0
+            @test node_goat_val_count(e) == 0
+            @test count_branches(e, key) == 0
+            @test prior_branch_key(e, key) == UInt8[]
+            @test node_remove_all_branches!(e, key, false) == false
+            @test node_first_val_depth_along_key(e, key) === nothing
+        end
+
+        @testset "EmptyNode — iteration" begin
+            e = EmptyNode{Int, GlobalAlloc}()
+            @test new_iter_token(e) == UInt128(0)
+            @test iter_token_for_path(e, UInt8[1, 2]) == UInt128(0)
+            tok, path, child, val = next_items(e, UInt128(0))
+            @test tok == NODE_ITER_FINISHED
+            @test path == UInt8[]
+            @test child === nothing
+            @test val === nothing
+        end
+
+        @testset "EmptyNode — child iteration" begin
+            e = EmptyNode{Int, GlobalAlloc}()
+            start_tok, start_child = node_child_iter_start(e)
+            @test start_tok == UInt64(0)
+            @test start_child === nothing
+            next_tok, next_child = node_child_iter_next(e, UInt64(0))
+            @test next_tok == UInt64(0)
+            @test next_child === nothing
+        end
+
+        @testset "EmptyNode — nth/first child and siblings" begin
+            e = EmptyNode{Int, GlobalAlloc}()
+            key = UInt8[]
+            node1, node2 = nth_child_from_key(e, key, 1)
+            @test node1 === nothing && node2 === nothing
+            f1, f2 = first_child_from_key(e, key)
+            @test f1 === nothing && f2 === nothing
+            s1, s2 = get_sibling_of_child(e, key, true)
+            @test s1 === nothing && s2 === nothing
+        end
+
+        @testset "EmptyNode — node ref and take" begin
+            e = EmptyNode{Int, GlobalAlloc}()
+            ref = get_node_at_key(e, UInt8[1])
+            @test ref isa ANRNone{Int, GlobalAlloc}
+            @test is_none(ref)
+            @test take_node_at_key!(e, UInt8[1], false) === nothing
+        end
+
+        @testset "EmptyNode — lattice ops" begin
+            e = EmptyNode{Int, GlobalAlloc}()
+            e2 = EmptyNode{Int, GlobalAlloc}()
+            # pjoin_dyn: empty ⊕ empty → None
+            res1 = pjoin_dyn(e, e2)
+            @test res1 isa AlgResNone
+            # pmeet_dyn: empty ∧ empty → Identity(SELF|COUNTER)
+            res2 = pmeet_dyn(e, e2)
+            @test res2 isa AlgResIdentity
+            @test res2.mask == (SELF_IDENT | COUNTER_IDENT)
+            # psubtract_dyn: always None
+            @test psubtract_dyn(e, e2) isa AlgResNone
+            # prestrict_dyn: always None
+            @test prestrict_dyn(e, e2) isa AlgResNone
+        end
+
+        @testset "EmptyNode — write methods panic" begin
+            e = EmptyNode{Int, GlobalAlloc}()
+            rc = TrieNodeODRc{Int, GlobalAlloc}()
+            @test_throws ErrorException node_replace_child!(e, UInt8[1], rc)
+            @test_throws ErrorException node_set_val!(e, UInt8[1], 42)
+            @test_throws ErrorException node_remove_val!(e, UInt8[1], false)
+            @test_throws ErrorException node_create_dangling!(e, UInt8[1])
+            @test_throws ErrorException node_remove_dangling!(e, UInt8[1])
+            @test_throws ErrorException node_set_branch!(e, UInt8[1], rc)
+            @test_throws ErrorException clone_self(e)
+            @test_throws ErrorException convert_to_cell_node!(e)
+        end
+
+        @testset "EmptyNode — node_get_payloads vacuously exhaustive" begin
+            e = EmptyNode{Int, GlobalAlloc}()
+            @test node_get_payloads(e, nothing, nothing) == true
+        end
+
+        @testset "EmptyNode — join_into_dyn! empty ⊕ empty sentinel" begin
+            e = EmptyNode{Int, GlobalAlloc}()
+            rc = TrieNodeODRc{Int, GlobalAlloc}()   # empty sentinel
+            status, result = join_into_dyn!(e, rc)
+            @test status == ALG_STATUS_NONE
+            @test result === nothing
+        end
+
+        @testset "EmptyNode — drop_head_dyn! is no-op" begin
+            e = EmptyNode{Int, GlobalAlloc}()
+            @test drop_head_dyn!(e, 3) === nothing
+        end
+
+        @testset "EmptyNode — node_branches_mask returns empty ByteMask" begin
+            e = EmptyNode{Int, GlobalAlloc}()
+            @test node_branches_mask(e, UInt8[]) == ByteMask()
+        end
+
+        @testset "EmptyNode — node_remove_unmasked_branches! is no-op" begin
+            e = EmptyNode{Int, GlobalAlloc}()
+            @test node_remove_unmasked_branches!(e, UInt8[], ByteMask(), false) === nothing
+        end
     end
 end

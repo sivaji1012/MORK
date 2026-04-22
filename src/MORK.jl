@@ -40,6 +40,10 @@ include("utils/Ints.jl")
 # Concrete node types land in nodes/*.jl (Phase 1b).
 include("nodes/TrieNode.jl")
 
+# Zero-field singleton for empty trie positions.
+# Ports pathmap/src/empty_node.rs.
+include("nodes/EmptyNode.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """
