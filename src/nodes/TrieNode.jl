@@ -537,32 +537,34 @@ end
 # defined in Ring.jl.  Only the pmeet-specific helpers are added here.
 
 """
-    fat_from_binary_op_result(result, a, b) → FatAlgebraicResult
+    fat_from_binary_op_result(result, a::T, b::T) → FatAlgebraicResult{T}
 
-Convert a binary-op `AlgebraicResult` into a `FatAlgebraicResult`, materialising
+Convert a binary-op `AlgebraicResult` into a `FatAlgebraicResult{T}`, materialising
 `a` or `b` as the element when the result is Identity.
 Ports `FatAlgebraicResult::from_binary_op_result`.
 """
-function fat_from_binary_op_result(result, a, b)
+function fat_from_binary_op_result(result, a::T, b::T) where {T}
     if result isa AlgResNone
-        return FatAlgebraicResult{Any}(UInt64(0), nothing)
+        return FatAlgebraicResult{T}(UInt64(0), nothing)
     elseif result isa AlgResElement
-        return FatAlgebraicResult{Any}(UInt64(0), result.value)
+        return FatAlgebraicResult{T}(UInt64(0), result.value)
     else  # AlgResIdentity
         mask = result.mask
         elem = (mask & SELF_IDENT != 0) ? a : b
-        return FatAlgebraicResult{Any}(mask, elem)
+        return FatAlgebraicResult{T}(mask, elem)
     end
 end
 
 """
-    fat_map(fat, f) → FatAlgebraicResult{Any}
+    fat_map(fat::FatAlgebraicResult{W}, f, ::Type{R}) → FatAlgebraicResult{R}
 
-Apply `f` to `fat.element` (if non-nothing). Ports `FatAlgebraicResult::map`.
+Apply `f` to `fat.element` (if non-nothing), producing a `FatAlgebraicResult{R}`.
+`R` must be provided explicitly so the result type is always concrete and stable.
+Ports `FatAlgebraicResult::map`.
 """
-function fat_map(fat::FatAlgebraicResult{W}, f) where W
-    elem2 = fat.element === nothing ? nothing : f(fat.element)
-    FatAlgebraicResult{Any}(fat.identity_mask, elem2)
+function fat_map(fat::FatAlgebraicResult{W}, f::F, ::Type{R}) where {W, F, R}
+    elem2::Union{Nothing,R} = fat.element === nothing ? nothing : f(fat.element)::R
+    FatAlgebraicResult{R}(fat.identity_mask, elem2)
 end
 
 # =====================================================================
@@ -755,7 +757,9 @@ Core recursive worker for `pmeet_generic`.  Fills `results` with
 `FatAlgebraicResult` for each self_payload entry.  Returns `is_exhaustive`.
 Ports `pmeet_generic_internal` (trie_node.rs lines 596–715).
 """
-function pmeet_generic_internal!(self_payloads, keys, req_results, results,
+function pmeet_generic_internal!(self_payloads, keys,
+                                  req_results,
+                                  results::AbstractVector{FatAlgebraicResult{ValOrChild{V,A}}},
                                   other_node::AbstractTrieNode{V,A}) where {V,A}
     is_ex_ref = Ref(true)
 
@@ -800,13 +804,13 @@ function pmeet_generic_internal!(self_payloads, keys, req_results, results,
                     other_link = get_child(payload)
                     r = pmeet(self_link, other_link)
                     fat_map(fat_from_binary_op_result(r, self_link, other_link),
-                            c -> ValOrChild(c))
+                            c -> ValOrChild(c), ValOrChild{V,A})
                 else
                     self_val = get_val(self_pr)
                     other_val = get_val(payload)
                     r = pmeet(self_val, other_val)
                     fat_map(fat_from_binary_op_result(r, self_val, other_val),
-                            v -> ValOrChild(v))
+                            v -> ValOrChild(v), ValOrChild{V,A})
                 end
                 results[idx] = fat_res
             end
@@ -824,16 +828,16 @@ function pmeet_generic_internal!(self_payloads, keys, req_results, results,
                 if other_opt !== nothing
                     r = pmeet_dyn(as_tagged(self_link), as_tagged(other_opt))
                     fat_map(fat_from_binary_op_result(r, self_link, other_opt),
-                            c -> ValOrChild(c))
+                            c -> ValOrChild(c), ValOrChild{V,A})
                 else
                     if is_empty_node(self_link) && node_get_val(other_node, keys[idx][1]) !== nothing
-                        FatAlgebraicResult{Any}(SELF_IDENT, ValOrChild(TrieNodeODRc{V,A}()))
+                        FatAlgebraicResult{ValOrChild{V,A}}(SELF_IDENT, ValOrChild(TrieNodeODRc{V,A}()))
                     else
-                        FatAlgebraicResult{Any}(COUNTER_IDENT, nothing)
+                        FatAlgebraicResult{ValOrChild{V,A}}(COUNTER_IDENT, nothing)
                     end
                 end
             else
-                FatAlgebraicResult{Any}(COUNTER_IDENT, nothing)
+                FatAlgebraicResult{ValOrChild{V,A}}(COUNTER_IDENT, nothing)
             end
             results[idx] = fat_res
         end
@@ -853,8 +857,8 @@ Generic lattice-meet over a node's payloads vs another node.
 Ports `pmeet_generic` (trie_node.rs lines 541–591).
 
 `self_payloads` must be sorted by key (ascending).
-`merge_f(payloads::Vector{Any})` receives the per-slot results (each is
-`Union{Nothing,ValOrChild{V,A}}`) and must return a `TrieNodeODRc`.
+`merge_f(payloads::Vector{Union{Nothing,ValOrChild{V,A}}})` receives the per-slot
+results and must return a `TrieNodeODRc{V,A}`.
 """
 function pmeet_generic(self_payloads::AbstractVector,
                         other::AbstractTrieNode{V,A},
@@ -862,21 +866,21 @@ function pmeet_generic(self_payloads::AbstractVector,
     n = length(self_payloads)
     n == 0 && return AlgResNone()
 
-    request_keys  = [(copy(p[1]), is_val(p[2])) for p in self_payloads]
-    element_results = [fat_none(Any) for _ in 1:n]
+    request_keys    = [(copy(p[1]), is_val(p[2])) for p in self_payloads]
+    element_results = FatAlgebraicResult{ValOrChild{V,A}}[fat_none(ValOrChild{V,A}) for _ in 1:n]
     req_results     = [(0, PayloadRef{V,A}()) for _ in 1:n]
 
     is_exhaustive = pmeet_generic_internal!(self_payloads, request_keys, req_results,
                                              element_results, other)
 
-    is_none_all    = true
-    combined_mask  = SELF_IDENT | COUNTER_IDENT
-    result_payloads = Vector{Any}(undef, n)
+    is_none_all     = true
+    combined_mask   = SELF_IDENT | COUNTER_IDENT
+    result_payloads = Vector{Union{Nothing,ValOrChild{V,A}}}(undef, n)
 
     for i in 1:n
         res = element_results[i]
-        combined_mask   = combined_mask & res.identity_mask
-        is_none_all      = is_none_all && res.element === nothing
+        combined_mask      = combined_mask & res.identity_mask
+        is_none_all        = is_none_all && res.element === nothing
         result_payloads[i] = res.element
     end
 
