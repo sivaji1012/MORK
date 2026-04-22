@@ -49,6 +49,10 @@ include("nodes/EmptyNode.jl")
 # stubbed with error() until those node types are ported.
 include("nodes/LineListNode.jl")
 
+# Read-only 1-entry borrowed view into another node (≤7-byte key).
+# Ports pathmap/src/tiny_node.rs.
+include("nodes/TinyRefNode.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """

@@ -1038,5 +1038,117 @@ using MORK
             @test res isa AlgResIdentity
             @test res.mask == SELF_IDENT
         end
+
+        # ================================================================
+        # TinyRefNode tests
+        # ================================================================
+
+        @testset "TinyRefNode — struct and tag" begin
+            key = collect(UInt8, "hi")
+            payload = ValOrChild(42)
+            t = TinyRefNode(false, key, payload, GlobalAlloc())
+            @test node_tag(t) == TINY_REF_NODE_TAG
+            @test !node_is_empty(t)
+            @test TINY_REF_MAX_KEY == 7
+        end
+
+        @testset "TinyRefNode — empty when key is empty" begin
+            t = TinyRefNode{Int, GlobalAlloc}(UInt8[], false, ValOrChild(0), GlobalAlloc())
+            @test node_is_empty(t)
+        end
+
+        @testset "TinyRefNode — contains_val and get_val" begin
+            key = collect(UInt8, "abc")
+            t = TinyRefNode(false, key, ValOrChild(99), GlobalAlloc())
+            @test node_contains_val(t, key)
+            @test node_get_val(t, key) == 99
+            @test !node_contains_val(t, collect(UInt8, "xyz"))
+            @test node_get_val(t, collect(UInt8, "xyz")) === nothing
+        end
+
+        @testset "TinyRefNode — node_get_child with child payload" begin
+            child_n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(child_n, collect(UInt8, "world"), 7)
+            child_rc = TrieNodeODRc(child_n, GlobalAlloc())
+            key = collect(UInt8, "abc")
+            t = TinyRefNode(true, key, ValOrChild(child_rc), GlobalAlloc())
+            @test t.is_child == true
+            result = node_get_child(t, key)
+            @test result !== nothing
+            consumed, got_rc = result
+            @test consumed == 3
+            @test node_get_val(as_tagged(got_rc), collect(UInt8, "world")) == 7
+        end
+
+        @testset "TinyRefNode — node_key_overlap and contains_partial_key" begin
+            key = collect(UInt8, "hello")
+            t = TinyRefNode(false, key, ValOrChild(1), GlobalAlloc())
+            @test node_key_overlap(t, collect(UInt8, "help")) == 3
+            @test node_contains_partial_key(t, collect(UInt8, "hel"))
+            @test !node_contains_partial_key(t, collect(UInt8, "world"))
+        end
+
+        @testset "TinyRefNode — get_node_at_key zero length" begin
+            key = collect(UInt8, "ab")
+            t = TinyRefNode(false, key, ValOrChild(5), GlobalAlloc())
+            ref = get_node_at_key(t, UInt8[])
+            @test ref isa ANRBorrowedDyn{Int, GlobalAlloc}
+        end
+
+        @testset "TinyRefNode — get_node_at_key exact child match" begin
+            child_n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            child_rc = TrieNodeODRc(child_n, GlobalAlloc())
+            key = collect(UInt8, "ab")
+            t = TinyRefNode(true, key, ValOrChild(child_rc), GlobalAlloc())
+            ref = get_node_at_key(t, key)
+            @test ref isa ANRBorrowedRc{Int, GlobalAlloc}
+        end
+
+        @testset "TinyRefNode — get_node_at_key sub-key creates new TinyRefNode" begin
+            key = collect(UInt8, "abcde")
+            t = TinyRefNode(false, key, ValOrChild(42), GlobalAlloc())
+            ref = get_node_at_key(t, collect(UInt8, "ab"))
+            @test ref isa ANRBorrowedTiny{Int, GlobalAlloc}
+            inner = ref.node
+            @test inner isa TinyRefNode{Int, GlobalAlloc}
+            @test inner.key == collect(UInt8, "cde")
+        end
+
+        @testset "TinyRefNode — into_full creates LineListNode" begin
+            key = collect(UInt8, "xyz")
+            t = TinyRefNode(false, key, ValOrChild(77), GlobalAlloc())
+            list_n = into_full(t)
+            @test list_n isa LineListNode{Int, GlobalAlloc}
+            @test node_get_val(list_n, key) == 77
+        end
+
+        @testset "TinyRefNode — write methods panic" begin
+            t = TinyRefNode(false, collect(UInt8, "a"), ValOrChild(1), GlobalAlloc())
+            @test_throws ErrorException node_remove_val!(t, UInt8[1], false)
+            @test_throws ErrorException node_create_dangling!(t, UInt8[1])
+            @test_throws ErrorException node_remove_dangling!(t, UInt8[1])
+            @test_throws ErrorException node_remove_all_branches!(t, UInt8[], false)
+            @test_throws ErrorException take_node_at_key!(t, UInt8[1], false)
+        end
+
+        @testset "TinyRefNode — node_first_val_depth_along_key" begin
+            key = collect(UInt8, "ab")
+            t = TinyRefNode(false, key, ValOrChild(5), GlobalAlloc())
+            @test node_first_val_depth_along_key(t, collect(UInt8, "abc")) == 1  # len(key)-1
+            @test node_first_val_depth_along_key(t, collect(UInt8, "xyz")) === nothing
+        end
+
+        @testset "TinyRefNode — node_child_iter_start with child" begin
+            child_n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            child_rc = TrieNodeODRc(child_n, GlobalAlloc())
+            t = TinyRefNode(true, collect(UInt8, "a"), ValOrChild(child_rc), GlobalAlloc())
+            tok, got_rc = node_child_iter_start(t)
+            @test tok == UInt64(0)
+            @test got_rc !== nothing
+            # next is always (0, nothing)
+            tok2, got2 = node_child_iter_next(t, tok)
+            @test tok2 == UInt64(0)
+            @test got2 === nothing
+        end
     end
 end
