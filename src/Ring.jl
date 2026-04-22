@@ -571,6 +571,114 @@ function psubtract(a::Bool, b::Bool)::AlgebraicResult{Bool}
 end
 
 # =====================================================================
+# Reference-typed trait variants
+# =====================================================================
+#
+# Upstream ring.rs exposes `LatticeRef` and `DistributiveLatticeRef`,
+# which mirror their owned counterparts but allow the result type to
+# differ from `Self`. Used for blanket impls on `Option<&T>` (where
+# the referenced T is not owned by the caller but the result type
+# must still be `Option<T>`).
+
+"""
+    AbstractLatticeRef <: AbstractLattice
+
+Reference-typed analog of [`AbstractLattice`]. Upstream:
+
+    pub trait LatticeRef {
+        type T;
+        fn pjoin(&self, other: &Self) -> AlgebraicResult<Self::T>;
+        fn pmeet(&self, other: &Self) -> AlgebraicResult<Self::T>;
+    }
+
+The `type T` associated type is handled in Julia via return-type
+dispatch — impls may return an `AlgebraicResult{T}` where `T`
+differs from the self type.
+"""
+abstract type AbstractLatticeRef end
+
+"""
+    AbstractDistributiveLatticeRef <: AbstractLatticeRef
+
+Reference-typed analog of [`AbstractDistributiveLattice`]. Upstream:
+
+    pub trait DistributiveLatticeRef {
+        type T;
+        fn psubtract(&self, other: &Self) -> AlgebraicResult<Self::T>;
+    }
+"""
+abstract type AbstractDistributiveLatticeRef <: AbstractLatticeRef end
+
+# =====================================================================
+# Quantale (restrict operation)
+# =====================================================================
+
+"""
+    AbstractQuantale
+
+Used to implement the **restrict** operation. Upstream:
+
+    pub(crate) trait Quantale {
+        fn prestrict(&self, other: &Self) -> AlgebraicResult<Self>;
+    }
+
+Currently crate-internal in upstream because the semantics of `restrict`
+are still being refined. Declared here for API surface fidelity — impls
+arrive when concrete node types land.
+"""
+abstract type AbstractQuantale end
+
+"""
+    prestrict(self, other) -> AlgebraicResult
+
+The partial restrict operation. Part of the `Quantale` trait family.
+"""
+function prestrict end
+
+# =====================================================================
+# Internal Hetero mirrors (pub(crate) in upstream)
+# =====================================================================
+#
+# These are "internal mirror" traits where `self` and `other` don't have
+# to be exactly the same type, enabling blanket impls. Declared here as
+# abstract supertypes so downstream crates can tag the implementations.
+# Methods are re-used: `pjoin`, `pmeet`, `psubtract`, `prestrict` — just
+# called with a different self/other pairing via multiple dispatch.
+
+"""
+    AbstractHeteroLattice
+
+Internal mirror of [`AbstractLattice`] where `self` and `other` may be
+different types (enables blanket impls). Upstream `pub(crate)`.
+"""
+abstract type AbstractHeteroLattice end
+
+"""
+    AbstractHeteroDistributiveLattice
+
+Internal mirror of [`AbstractDistributiveLattice`] where `self` and
+`other` may be different types. Upstream `pub(crate)`.
+"""
+abstract type AbstractHeteroDistributiveLattice end
+
+"""
+    AbstractHeteroQuantale
+
+Internal mirror of [`AbstractQuantale`] where `self` and `other` may be
+different types. Upstream `pub(crate)`.
+"""
+abstract type AbstractHeteroQuantale end
+
+"""
+    convert_hetero(::Type{T}, other) -> T
+
+Part of `HeteroLattice`: convert a value of a different type into the
+self type, used by the default `join_into!` impl. One impl per
+(Self, Other) pairing.
+"""
+function convert_hetero end
+
+# =====================================================================
 # Exports
 # =====================================================================
 
@@ -579,7 +687,11 @@ export AlgebraicResult, AlgResNone, AlgResIdentity, AlgResElement
 export AlgebraicStatus, ALG_STATUS_ELEMENT, ALG_STATUS_IDENTITY, ALG_STATUS_NONE
 export FatAlgebraicResult, fat_none, fat_element
 export AbstractLattice, AbstractDistributiveLattice
+export AbstractLatticeRef, AbstractDistributiveLatticeRef
+export AbstractQuantale
+export AbstractHeteroLattice, AbstractHeteroDistributiveLattice, AbstractHeteroQuantale
 export is_none, is_identity, is_element, identity_mask, invert_identity
 export map_into_option, into_option, unwrap_or_else
 export status, from_status, flatten, to_algebraic_result, merge_status
-export pjoin, pmeet, psubtract, join_into!, join_all
+export pjoin, pmeet, psubtract, prestrict, convert_hetero
+export join_into!, join_all

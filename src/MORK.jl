@@ -20,6 +20,9 @@ Design discipline (committed memories):
 """
 module MORK
 
+# Allocator shim (`Allocator` + `GlobalAlloc`). Ports pathmap/src/alloc.rs.
+include("Alloc.jl")
+
 # Core algebraic machinery (used by everything downstream).
 # Ports pathmap/src/ring.rs.
 include("Ring.jl")
