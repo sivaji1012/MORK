@@ -1129,6 +1129,106 @@ using MORK
         end
 
         # ================================================================
+        # factor_prefix! tests
+        # ================================================================
+
+        @testset "LineListNode — factor_prefix! no-op when no overlap" begin
+            using MORK: factor_prefix!
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(n, UInt8[0x61], 1)   # "a"
+            node_set_val!(n, UInt8[0x62], 2)   # "b"
+            factor_prefix!(n)
+            # No overlap → unchanged
+            @test is_used_0(n) && is_used_1(n)
+        end
+
+        @testset "LineListNode — factor_prefix! merges illegal overlap into shared prefix child" begin
+            using MORK: factor_prefix!
+            # "ab" child and "ac" child share "a" → should be merged into child at "a"
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            child1 = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(child1, UInt8[0x62], 10)   # "b" → 10
+            child2 = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(child2, UInt8[0x63], 20)   # "c" → 20
+            n.key0 = UInt8[0x61, 0x62]   # "ab"
+            n.slot0 = ValOrChild(TrieNodeODRc(child1, GlobalAlloc()))
+            n.key1 = UInt8[0x61, 0x63]   # "ac"
+            n.slot1 = ValOrChild(TrieNodeODRc(child2, GlobalAlloc()))
+            # Both keys start with 0x61 — overlap 1 but slot0 is a child (illegal)
+            factor_prefix!(n)
+            # After factoring: single slot at key "a" containing merged child
+            @test is_used_0(n)
+            @test !is_used_1(n)
+            @test n.key0 == UInt8[0x61]
+            @test is_child_0(n)
+        end
+
+        @testset "LineListNode — factor_prefix! legal overlap (val at overlap=1) → no-op" begin
+            using MORK: factor_prefix!
+            # "a" val and "ab" child: overlap=1, slot0 is a val → legal
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            child = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(child, UInt8[0x62], 5)
+            n.key0 = UInt8[0x61]
+            n.slot0 = ValOrChild(99)   # val
+            n.key1 = UInt8[0x61, 0x62]
+            n.slot1 = ValOrChild(TrieNodeODRc(child, GlobalAlloc()))
+            factor_prefix!(n)
+            # Legal overlap → unchanged
+            @test is_used_0(n) && is_used_1(n)
+        end
+
+        # ================================================================
+        # drop_head_dyn! both-slots path
+        # ================================================================
+
+        @testset "LineListNode — drop_head_dyn! both-slots case A: shorten both keys" begin
+            # Two slots: key0="abc"→1, key1="abd"→2; drop 2 bytes → "c"→1, "d"→2
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(n, collect(UInt8, "abc"), 1)
+            node_set_val!(n, collect(UInt8, "abd"), 2)
+            result = drop_head_dyn!(n, 2)
+            @test result !== nothing
+            shortened = as_tagged(result)
+            @test is_used_0(shortened) && is_used_1(shortened)
+            @test node_get_val(shortened, UInt8[0x63]) == 1   # "c" → 1
+            @test node_get_val(shortened, UInt8[0x64]) == 2   # "d" → 2
+        end
+
+        @testset "LineListNode — drop_head_dyn! both-slots case A: drop causes swap" begin
+            # key0="ba"→1, key1="bb"→2 (no swap needed after drop of 1 → "a" < "b")
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(n, collect(UInt8, "ba"), 1)
+            node_set_val!(n, collect(UInt8, "bc"), 2)
+            result = drop_head_dyn!(n, 1)
+            @test result !== nothing
+            s = as_tagged(result)
+            @test node_get_val(s, UInt8[0x61]) == 1   # "a" → 1
+            @test node_get_val(s, UInt8[0x63]) == 2   # "c" → 2
+        end
+
+        @testset "LineListNode — drop_head_dyn! drops val-slot when key consumed" begin
+            # key0="a"→1 (val, len=1), key1="abc"→2 (val, len=3); drop 1 → slot0 dropped
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(n, UInt8[0x61], 1)
+            node_set_val!(n, collect(UInt8, "abc"), 2)
+            result = drop_head_dyn!(n, 1)
+            @test result !== nothing
+            s = as_tagged(result)
+            # "a" dropped, remaining "bc" should be present
+            @test node_get_val(s, collect(UInt8, "bc")) == 2
+        end
+
+        @testset "LineListNode — drop_head_dyn! both-slots fully drops both vals" begin
+            # Both slots are vals with key len ≤ byte_cnt → both dropped → nothing
+            n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(n, UInt8[0x61], 1)
+            node_set_val!(n, UInt8[0x62], 2)
+            result = drop_head_dyn!(n, 1)
+            @test result === nothing
+        end
+
+        # ================================================================
         # TinyRefNode tests
         # ================================================================
 

@@ -1625,6 +1625,32 @@ function join_into_dyn!(self::LineListNode{V,A}, other::TrieNodeODRc{V,A}) where
     end
 end
 
+# factor_prefix!: if the two slots share an illegal key overlap, merge them
+# into a single slot at the shared prefix.  Ports Rust fn factor_prefix (line 1046).
+function factor_prefix!(n::LineListNode{V,A}) where {V,A}
+    (!is_used_0(n) || !is_used_1(n)) && return
+    key0, key1 = n.key0, n.key1
+    overlap = find_prefix_overlap(key0, key1)
+    # overlap == 1 is legal if: slot0 is a val OR (both len==1 and slot1 is a val)
+    legal_overlap = overlap == 1 && (
+        !is_child_0(n) || (!is_child_1(n) && length(key0) == 1 && length(key1) == 1))
+    (overlap == 0 || legal_overlap) && return
+
+    r = _merge_guts(overlap, key0, n, 0, key1, n, 1)
+    if r isa AlgResElement
+        (shared_key, merged_payload) = r.value
+        n.key0  = Vector{UInt8}(shared_key)
+        n.slot0 = merged_payload
+        n.slot1 = nothing
+        n.key1  = UInt8[]
+    elseif r isa AlgResIdentity
+        # Both sides equal → keep slot0, clear slot1
+        n.slot1 = nothing
+        n.key1  = UInt8[]
+    end
+    # AlgResNone: no change needed
+end
+
 function drop_head_dyn!(self::LineListNode{V,A}, byte_cnt::Int) where {V,A}
     @assert byte_cnt > 0
     # Drop values whose keys are fully consumed by byte_cnt
@@ -1637,7 +1663,6 @@ function drop_head_dyn!(self::LineListNode{V,A}, byte_cnt::Int) where {V,A}
         # Single-slot case
         klen0 = key_len_0(self)
         if byte_cnt < klen0
-            new_len = klen0 - byte_cnt
             self.key0 = self.key0[(byte_cnt+1):end]
             return TrieNodeODRc(self, self.alloc)
         else
@@ -1654,7 +1679,55 @@ function drop_head_dyn!(self::LineListNode{V,A}, byte_cnt::Int) where {V,A}
     end
 
     # Both slots filled
-    error("LineListNode::drop_head_dyn! (both-slots path) — factor_prefix not yet fully ported")
+    key0 = copy(self.key0)
+    key1 = copy(self.key1)
+    key0_len = length(key0)
+    key1_len = length(key1)
+
+    # Case A: byte_cnt < both key lengths → shorten keys in-place, re-sort, factor
+    if byte_cnt < key0_len && byte_cnt < key1_len
+        new_key0 = key0[(byte_cnt+1):end]
+        new_key1 = key1[(byte_cnt+1):end]
+        if new_key0 <= new_key1
+            self.key0 = new_key0
+            self.key1 = new_key1
+        else
+            # Swap to preserve slot0 ≤ slot1 key order
+            self.key0 = new_key1
+            self.key1 = new_key0
+            self.slot0, self.slot1 = self.slot1, self.slot0
+        end
+        factor_prefix!(self)
+        return TrieNodeODRc(self, self.alloc)
+    end
+
+    # Case B: at least one key is fully consumed; merge and recurse.
+    # chop_bytes = length of the shortest key.
+    # new_key{0,1} start one byte before chop_bytes (Rust: key[chop_bytes-1..]).
+    chop_bytes = min(key0_len, key1_len)
+    new_key0 = key0[chop_bytes:end]   # 1-indexed: = key0[(chop_bytes-1+1):end]
+    new_key1 = key1[chop_bytes:end]
+    # overlap of the parts BEYOND chop_bytes (0-indexed equiv: key[chop_bytes..])
+    overlap_suffix = find_prefix_overlap(
+        chop_bytes < key0_len ? key0[(chop_bytes+1):end] : UInt8[],
+        chop_bytes < key1_len ? key1[(chop_bytes+1):end] : UInt8[])
+    r = _merge_guts(overlap_suffix + 1, new_key0, self, 0, new_key1, self, 1)
+
+    merged_payload = if r isa AlgResElement
+        r.value[2]
+    elseif r isa AlgResIdentity
+        (r.mask & SELF_IDENT != 0) ? clone_slot0_payload(self) : clone_slot1_payload(self)
+    else
+        error("drop_head_dyn!: _merge_guts returned None — should be unreachable")
+    end
+
+    @assert is_child(merged_payload) "drop_head_dyn!: merged payload must be a child"
+    child_rc = into_child(merged_payload)
+    if chop_bytes == byte_cnt
+        return child_rc
+    else
+        return drop_head_dyn!(as_tagged(child_rc), byte_cnt - chop_bytes)
+    end
 end
 
 function pmeet_dyn(self::LineListNode{V,A}, other::AbstractTrieNode{V,A}) where {V,A}
