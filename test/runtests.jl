@@ -226,6 +226,279 @@ using MORK
             @test r isa AlgResElement && r.value === nothing
         end
 
+        @testset "Utils — Bits4 primitives" begin
+            empty = MORK.EMPTY_BITS4
+            full  = MORK.FULL_BITS4
+            @test count_bits(empty) == 0
+            @test count_bits(full) == 256
+            @test is_empty_mask(empty)
+            @test !is_empty_mask(full)
+
+            # Test bits at word boundaries
+            for b in (UInt8(0), UInt8(63), UInt8(64), UInt8(127),
+                      UInt8(128), UInt8(191), UInt8(192), UInt8(255))
+                m = with_bit_set(empty, b)
+                @test test_bit(m, b)
+                @test count_bits(m) == 1
+                m2 = with_bit_cleared(m, b)
+                @test !test_bit(m2, b)
+                @test m2 == empty
+            end
+
+            # Boolean ops
+            a = with_bit_set(with_bit_set(empty, UInt8(1)), UInt8(3))
+            b = with_bit_set(with_bit_set(empty, UInt8(3)), UInt8(5))
+            @test count_bits(bor(a, b)) == 3
+            @test count_bits(band(a, b)) == 1
+            @test count_bits(bxor(a, b)) == 2
+            @test count_bits(bandn(a, b)) == 1   # a & !b = {1}
+            @test count_bits(bnot(empty)) == 256
+        end
+
+        @testset "Utils — ByteMask basics (upstream bit_utils_test)" begin
+            # Port of pathmap/src/utils/mod.rs:683-702
+            m = ByteMask()
+            @test count_bits(m) == 0
+            @test is_empty_mask(m)
+
+            m = set(m, UInt8('C'))
+            m = set(m, UInt8('a'))
+            m = set(m, UInt8('t'))
+            @test !is_empty_mask(m)
+            @test count_bits(m) == 3
+
+            m = set(m, UInt8('C'))   # idempotent
+            m = set(m, UInt8('a'))
+            m = set(m, UInt8('n'))
+            @test count_bits(m) == 4
+
+            m = unset(m, UInt8('t'))
+            @test test_bit(m, UInt8('n'))
+            @test !test_bit(m, UInt8('t'))
+        end
+
+        @testset "Utils — next_bit_test (upstream port)" begin
+            # Port of pathmap/src/utils/mod.rs:704-753
+            function do_test(test_mask::ByteMask)
+                set_bits = UInt8[]
+                for i in UInt8(0):UInt8(255)
+                    test_bit(test_mask, i) && push!(set_bits, i)
+                end
+
+                # Forward walk via next_bit starting at 0
+                i::UInt8 = UInt8(0)
+                cnt = test_bit(test_mask, UInt8(0)) ? 1 : 0
+                while true
+                    nb = next_bit(test_mask, i)
+                    nb === nothing && break
+                    @test test_bit(test_mask, nb)
+                    i = nb
+                    cnt += 1
+                end
+                @test cnt == length(set_bits)
+
+                # Backward walk via prev_bit starting at 255
+                i = UInt8(255)
+                cnt = test_bit(test_mask, UInt8(255)) ? 1 : 0
+                while true
+                    pb = prev_bit(test_mask, i)
+                    pb === nothing && break
+                    @test test_bit(test_mask, pb)
+                    i = pb
+                    cnt += 1
+                end
+                @test cnt == length(set_bits)
+            end
+
+            do_test(ByteMask((
+                0b1010010010010010010010000000000000000000000000000000000000010101,
+                0b0000000000000000000000000000000000000000100000000000000000000000,
+                0b0000000000000000000000000000000000000000000000000000000000000000,
+                0b1001000000000000000000000000000000000000000000000000000000000001,
+            )))
+            do_test(ByteMask((
+                0b0000000000000000000000000000000000000000000000000000000000000000,
+                0b0000000000000000000000000000000000000000100000000000000000000000,
+                0b0000000000000000000000000000000000000000000000000000000000000000,
+                0b1001000000000000000000000000000000000000000000000000000000000001,
+            )))
+            do_test(bytemask_full())
+        end
+
+        @testset "Utils — next_bit_test2 (specific bytes 39/97/117)" begin
+            m = ByteMask()
+            m = set(m, UInt8(39))
+            m = set(m, UInt8(97))
+            m = set(m, UInt8(117))
+
+            @test next_bit(m, UInt8(0)) == UInt8(39)
+            @test next_bit(m, UInt8(39)) == UInt8(97)
+            @test next_bit(m, UInt8(97)) == UInt8(117)
+            @test next_bit(m, UInt8(117)) === nothing
+        end
+
+        @testset "Utils — from_range (upstream port)" begin
+            # Port of pathmap/src/utils/mod.rs:755-780
+            m = from_range(10:69)   # Julia 10:69 ≡ Rust 10..70
+            expected_bits = (
+                0b1111111111111111111111111111111111111111111111111111110000000000,
+                0b0000000000000000000000000000000000000000000000000000000000111111,
+                UInt64(0),
+                UInt64(0),
+            )
+            @test m.bits == expected_bits
+
+            @test from_range_full() == bytemask_full()
+            @test from_range(0:127) == ByteMask((
+                typemax(UInt64), typemax(UInt64), UInt64(0), UInt64(0),
+            ))
+            @test from_range(10:255) == ByteMask((
+                0b1111111111111111111111111111111111111111111111111111110000000000,
+                typemax(UInt64), typemax(UInt64), typemax(UInt64),
+            ))
+
+            # Empty / degenerate ranges
+            @test from_range(0:-1) == ByteMask()             # empty range
+            @test from_range(0:0) == ByteMask(UInt8(0))
+            @test from_range(255:255) == ByteMask(UInt8(255))
+        end
+
+        @testset "Utils — index_of (rank)" begin
+            # Construct a mask with known bits: {1, 5, 100, 200}
+            m = ByteMask()
+            m = set(m, UInt8(1))
+            m = set(m, UInt8(5))
+            m = set(m, UInt8(100))
+            m = set(m, UInt8(200))
+
+            # Count set bits strictly below each threshold
+            @test index_of(m, UInt8(0))   == UInt8(0)
+            @test index_of(m, UInt8(1))   == UInt8(0)     # nothing below 1
+            @test index_of(m, UInt8(2))   == UInt8(1)     # {1}
+            @test index_of(m, UInt8(6))   == UInt8(2)     # {1, 5}
+            @test index_of(m, UInt8(101)) == UInt8(3)     # {1, 5, 100}
+            @test index_of(m, UInt8(255)) == UInt8(4)     # all four
+        end
+
+        @testset "Utils — indexed_bit (select, forward + backward)" begin
+            # Construct mask with bits {3, 20, 100, 200, 255}
+            m = ByteMask()
+            for b in UInt8[3, 20, 100, 200, 255]
+                m = set(m, b)
+            end
+
+            # Forward: idx 0 = first, idx 1 = second, etc.
+            @test indexed_bit(m, 0, true) == UInt8(3)
+            @test indexed_bit(m, 1, true) == UInt8(20)
+            @test indexed_bit(m, 2, true) == UInt8(100)
+            @test indexed_bit(m, 3, true) == UInt8(200)
+            @test indexed_bit(m, 4, true) == UInt8(255)
+            @test indexed_bit(m, 5, true) === nothing
+
+            # Backward: idx 0 = last, idx 1 = second-to-last, etc.
+            @test indexed_bit(m, 0, false) == UInt8(255)
+            @test indexed_bit(m, 1, false) == UInt8(200)
+            @test indexed_bit(m, 2, false) == UInt8(100)
+            @test indexed_bit(m, 3, false) == UInt8(20)
+            @test indexed_bit(m, 4, false) == UInt8(3)
+            @test indexed_bit(m, 5, false) === nothing
+        end
+
+        @testset "Utils — subset (Sierpinski)" begin
+            # SUBSET(0) has only bit 0 set (only j=0 satisfies 0 & j == j)
+            m0 = subset(UInt8(0))
+            @test test_bit(m0, UInt8(0))
+            @test count_bits(m0) == 1
+
+            # SUBSET(1) has bits {0, 1} set (j=0: 1&0==0 ✓; j=1: 1&1==1 ✓)
+            m1 = subset(UInt8(1))
+            @test test_bit(m1, UInt8(0))
+            @test test_bit(m1, UInt8(1))
+            @test count_bits(m1) == 2
+
+            # SUBSET(255) has ALL 256 bits set (every j is a subset of 255's bits)
+            m255 = subset(UInt8(255))
+            @test count_bits(m255) == 256
+
+            # SUBSET(3) has {0,1,2,3} set (binary: 11)
+            m3 = subset(UInt8(3))
+            @test count_bits(m3) == 4
+            for b in UInt8[0, 1, 2, 3]
+                @test test_bit(m3, b)
+            end
+        end
+
+        @testset "Utils — ByteMask iteration (ascending order)" begin
+            m = ByteMask()
+            for b in UInt8[5, 100, 200, 42]
+                m = set(m, b)
+            end
+            @test collect(m) == UInt8[5, 42, 100, 200]
+            @test length(m) == 4
+
+            # ByteMaskIter (destructive variant — upstream's iter method)
+            it = iter(m)
+            seen = UInt8[]
+            for b in it
+                push!(seen, b)
+            end
+            @test seen == UInt8[5, 42, 100, 200]
+
+            # Empty mask iterates nothing
+            empty = ByteMask()
+            @test collect(empty) == UInt8[]
+        end
+
+        @testset "Utils — ByteMask Lattice (pjoin / pmeet / psubtract)" begin
+            a = ByteMask()
+            a = set(a, UInt8(1)); a = set(a, UInt8(3)); a = set(a, UInt8(5))
+
+            b = ByteMask()
+            b = set(b, UInt8(3)); b = set(b, UInt8(5)); b = set(b, UInt8(7))
+
+            # pjoin = union; has both a's and b's bits
+            r = pjoin(a, b)
+            @test r isa AlgResElement
+            joined = (r::AlgResElement{ByteMask}).value
+            @test count_bits(joined) == 4
+            @test test_bit(joined, UInt8(1))
+            @test test_bit(joined, UInt8(3))
+            @test test_bit(joined, UInt8(5))
+            @test test_bit(joined, UInt8(7))
+
+            # pmeet = intersection
+            r = pmeet(a, b)
+            @test r isa AlgResElement
+            met = (r::AlgResElement{ByteMask}).value
+            @test count_bits(met) == 2
+            @test test_bit(met, UInt8(3))
+            @test test_bit(met, UInt8(5))
+
+            # Self-identity: pjoin(a, a) = Identity
+            r = pjoin(a, a)
+            @test r isa AlgResIdentity
+            @test r.mask == (SELF_IDENT | COUNTER_IDENT)
+
+            # Subset: pmeet(a, superset) = Identity(SELF_IDENT)
+            superset = ByteMask()
+            for b in UInt8[1, 3, 5, 7, 9]
+                superset = set(superset, b)
+            end
+            r = pmeet(a, superset)
+            @test r isa AlgResIdentity
+            @test (r.mask & SELF_IDENT) > 0
+
+            # psubtract
+            r = psubtract(a, b)
+            @test r isa AlgResElement
+            diff = (r::AlgResElement{ByteMask}).value
+            @test count_bits(diff) == 1
+            @test test_bit(diff, UInt8(1))
+
+            # psubtract(a, a) = None
+            @test psubtract(a, a) isa AlgResNone
+        end
+
         @testset "join_all" begin
             # empty → None
             @test join_all(UInt32[]) isa AlgResNone

@@ -24,6 +24,10 @@ module MORK
 # Ports pathmap/src/ring.rs.
 include("Ring.jl")
 
+# 256-bit BitMask surface + ByteMask type + ByteMaskIter.
+# Ports pathmap/src/utils/mod.rs.
+include("utils/Utils.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """
