@@ -53,6 +53,10 @@ include("nodes/LineListNode.jl")
 # Ports pathmap/src/tiny_node.rs.
 include("nodes/TinyRefNode.jl")
 
+# 256-slot bitmap-indexed node (DenseByteNode + CellByteNode + CoFreeEntry).
+# Ports pathmap/src/dense_byte_node.rs.
+include("nodes/DenseByteNode.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """

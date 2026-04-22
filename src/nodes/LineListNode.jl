@@ -508,11 +508,20 @@ function validate_list_node(n::LineListNode)::Bool
 end
 
 # =====================================================================
-# stub for convert_to_dense (DenseByteNode not yet ported)
+# _convert_to_dense! — upgrade LineListNode → DenseByteNode
 # =====================================================================
 
-function _convert_to_dense_stub!(::LineListNode{V,A}, ::Int) where {V,A}
-    error("LineListNode::convert_to_dense — DenseByteNode not yet ported; node upgrade path unimplemented")
+"""
+    _convert_to_dense!(n, capacity) → TrieNodeODRc
+
+Creates a DenseByteNode containing all entries from `n` and returns it as a
+new `TrieNodeODRc`. Ports the `convert_to_dense` path in upstream. Called
+when a third slot is required and the two existing slots cannot share a key.
+"""
+function _convert_to_dense_stub!(n::LineListNode{V,A}, ::Int) where {V,A}
+    dense = DenseByteNode{V,A}(n.alloc, 2)
+    merge_from_list_node!(dense, n)
+    TrieNodeODRc(dense, n.alloc)
 end
 
 # =====================================================================
@@ -1322,7 +1331,9 @@ function pjoin_dyn(self::LineListNode{V,A}, other::AbstractTrieNode{V,A}) where 
         # same type → merge_list_nodes equivalent (deferred until full impl)
         error("LineListNode::pjoin_dyn(LineListNode) — merge_list_nodes not yet ported")
     elseif tag == DENSE_BYTE_NODE_TAG || tag == CELL_BYTE_NODE_TAG
-        error("LineListNode::pjoin_dyn(DenseByteNode) — DenseByteNode not yet ported")
+        # LineListNode joins into a DenseByteNode: clone the ByteNode and merge self into it
+        r = pjoin_dyn(other, self)   # ByteNode dispatches merge_from_list_node!
+        return invert_identity(r)
     elseif tag == TINY_REF_NODE_TAG
         error("LineListNode::pjoin_dyn(TinyRefNode) — TinyRefNode not yet ported")
     else
@@ -1336,7 +1347,10 @@ function join_into_dyn!(self::LineListNode{V,A}, other::TrieNodeODRc{V,A}) where
     if other_tag == LINE_LIST_NODE_TAG
         error("LineListNode::join_into_dyn!(LineListNode) — merge_into_list_nodes not yet ported")
     elseif other_tag == DENSE_BYTE_NODE_TAG || other_tag == CELL_BYTE_NODE_TAG
-        error("LineListNode::join_into_dyn!(DenseByteNode) — not yet ported")
+        # Merge self (LineListNode) into the DenseByteNode
+        other_node = as_tagged(other)
+        status = merge_from_list_node!(other_node, self)
+        return (status, other)   # Err(other): caller replaces node with dense
     else
         error("LineListNode::join_into_dyn! — unknown node tag $other_tag")
     end
@@ -1380,11 +1394,39 @@ function pmeet_dyn(self::LineListNode{V,A}, other::AbstractTrieNode{V,A}) where 
 end
 
 function psubtract_dyn(self::LineListNode{V,A}, other::AbstractTrieNode{V,A}) where {V,A}
-    error("LineListNode::psubtract_dyn — DenseByteNode not yet ported")
+    tag = node_tag(other)
+    if tag == EMPTY_NODE_TAG
+        return AlgResIdentity(SELF_IDENT)
+    elseif tag == DENSE_BYTE_NODE_TAG || tag == CELL_BYTE_NODE_TAG
+        # Upgrade self to dense, then subtract via dense impl
+        dense = DenseByteNode{V,A}(self.alloc, 2)
+        merge_from_list_node!(dense, self)
+        return psubtract_dyn(dense, other)
+    elseif tag == LINE_LIST_NODE_TAG || tag == TINY_REF_NODE_TAG
+        # Use abstract subtract path via dense upgrade
+        dense = DenseByteNode{V,A}(self.alloc, 2)
+        merge_from_list_node!(dense, self)
+        return psubtract_dyn(dense, other)
+    else
+        error("LineListNode::psubtract_dyn — unknown tag $tag")
+    end
 end
 
 function prestrict_dyn(self::LineListNode{V,A}, other::AbstractTrieNode{V,A}) where {V,A}
-    error("LineListNode::prestrict_dyn — DenseByteNode not yet ported")
+    tag = node_tag(other)
+    if tag == EMPTY_NODE_TAG
+        return AlgResNone()
+    elseif tag == DENSE_BYTE_NODE_TAG || tag == CELL_BYTE_NODE_TAG
+        dense = DenseByteNode{V,A}(self.alloc, 2)
+        merge_from_list_node!(dense, self)
+        return prestrict_dyn(dense, other)
+    elseif tag == LINE_LIST_NODE_TAG || tag == TINY_REF_NODE_TAG
+        dense = DenseByteNode{V,A}(self.alloc, 2)
+        merge_from_list_node!(dense, self)
+        return prestrict_dyn(dense, other)
+    else
+        error("LineListNode::prestrict_dyn — unknown tag $tag")
+    end
 end
 
 function clone_self(n::LineListNode{V,A}) where {V,A}

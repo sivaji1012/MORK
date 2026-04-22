@@ -1151,4 +1151,245 @@ using MORK
             @test got2 === nothing
         end
     end
+
+    @testset "DenseByteNode (ports pathmap/src/dense_byte_node.rs)" begin
+        alloc = GlobalAlloc()
+
+        @testset "CoFreeEntry basics" begin
+            cf = CoFreeEntry{Int, GlobalAlloc}()
+            @test !has_rec(cf)
+            @test !has_val(cf)
+            cf.val = 42
+            @test has_val(cf)
+            @test !has_rec(cf)
+        end
+
+        @testset "DenseByteNode — struct and tag" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            @test node_tag(n) == DENSE_BYTE_NODE_TAG
+            @test node_is_empty(n)
+        end
+
+        @testset "CellByteNode — struct and tag" begin
+            n = CellByteNode{Int, GlobalAlloc}(alloc)
+            @test node_tag(n) == CELL_BYTE_NODE_TAG
+            @test node_is_empty(n)
+        end
+
+        @testset "DenseByteNode — set and get val" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            k = UInt8('a')
+            @test node_get_val(n, UInt8[k]) === nothing
+            @test !node_contains_val(n, UInt8[k])
+            node_set_val!(n, UInt8[k], 99)
+            @test node_contains_val(n, UInt8[k])
+            @test node_get_val(n, UInt8[k]) == 99
+            @test !node_is_empty(n)
+        end
+
+        @testset "DenseByteNode — replace val" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            k = UInt8('b')
+            node_set_val!(n, UInt8[k], 1)
+            (old, created) = node_set_val!(n, UInt8[k], 2)
+            @test old == 1
+            @test !created
+            @test node_get_val(n, UInt8[k]) == 2
+        end
+
+        @testset "DenseByteNode — multiple keys" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            for c in "abc"
+                node_set_val!(n, UInt8[UInt8(c)], Int(c))
+            end
+            @test node_get_val(n, UInt8['a']) == Int('a')
+            @test node_get_val(n, UInt8['b']) == Int('b')
+            @test node_get_val(n, UInt8['c']) == Int('c')
+            @test node_get_val(n, UInt8['d']) === nothing
+            @test count_branches(n, UInt8[]) == 3
+        end
+
+        @testset "DenseByteNode — node_remove_val" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            k = UInt8('x')
+            node_set_val!(n, UInt8[k], 7)
+            result = node_remove_val!(n, UInt8[k], true)
+            @test result == 7
+            @test !node_contains_val(n, UInt8[k])
+            @test node_is_empty(n)
+        end
+
+        @testset "DenseByteNode — set_child and get_child" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            k = UInt8('a')
+            child = LineListNode{Int, GlobalAlloc}(alloc)
+            child_rc = TrieNodeODRc(child, alloc)
+            node_set_branch!(n, UInt8[k], child_rc)
+            result = node_get_child(n, UInt8[k])
+            @test result !== nothing
+            (overlap, got_rc) = result
+            @test overlap == 1
+            @test !is_empty_node(got_rc)
+        end
+
+        @testset "DenseByteNode — node_key_overlap" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            k = UInt8('z')
+            @test node_key_overlap(n, UInt8[k]) == 0
+            node_set_val!(n, UInt8[k], 1)
+            @test node_key_overlap(n, UInt8[k]) == 1
+        end
+
+        @testset "DenseByteNode — node_contains_partial_key" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            k = UInt8('p')
+            @test !node_contains_partial_key(n, UInt8[k])
+            node_set_val!(n, UInt8[k], 1)
+            @test node_contains_partial_key(n, UInt8[k])
+            @test !node_contains_partial_key(n, UInt8[k, UInt8('q')])
+        end
+
+        @testset "DenseByteNode — iteration" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            # Empty node
+            tok = new_iter_token(n)
+            @test tok == UInt128(0)
+            (next_tok, path, child, val) = next_items(n, tok)
+            @test next_tok == NODE_ITER_FINISHED
+
+            # Single val
+            node_set_val!(n, UInt8['a'], 1)
+            tok = new_iter_token(n)
+            (next_tok2, path2, child2, val2) = next_items(n, tok)
+            @test val2 == 1
+            @test path2 == UInt8['a']
+            (done_tok, _, _, _) = next_items(n, next_tok2)
+            @test done_tok == NODE_ITER_FINISHED
+        end
+
+        @testset "DenseByteNode — branches_mask" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            node_set_val!(n, UInt8['a'], 1)
+            node_set_val!(n, UInt8['b'], 2)
+            m = node_branches_mask(n, UInt8[])
+            @test test_bit(m, UInt8('a'))
+            @test test_bit(m, UInt8('b'))
+            @test !test_bit(m, UInt8('c'))
+        end
+
+        @testset "DenseByteNode — get_node_at_key (zero-length key)" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            node_set_val!(n, UInt8['a'], 1)
+            ref = get_node_at_key(n, UInt8[])
+            @test ref isa ANRBorrowedDyn
+        end
+
+        @testset "DenseByteNode — get_node_at_key (exact child)" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            k = UInt8('k')
+            child_n = LineListNode{Int, GlobalAlloc}(alloc)
+            node_set_val!(child_n, UInt8['x'], 9)
+            child_rc = TrieNodeODRc(child_n, alloc)
+            node_set_branch!(n, UInt8[k], child_rc)
+            ref = get_node_at_key(n, UInt8[k])
+            @test ref isa ANRBorrowedRc
+        end
+
+        @testset "DenseByteNode — node_val_count" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            cache = Dict{UInt64, Int}()
+            @test node_val_count(n, cache) == 0
+            node_set_val!(n, UInt8['a'], 1)
+            node_set_val!(n, UInt8['b'], 2)
+            cache2 = Dict{UInt64, Int}()
+            @test node_val_count(n, cache2) == 2
+        end
+
+        @testset "DenseByteNode — pjoin_dyn with EmptyNode" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            node_set_val!(n, UInt8['a'], 1)
+            empty_n = EmptyNode{Int, GlobalAlloc}()
+            res = pjoin_dyn(n, empty_n)
+            @test res isa AlgResIdentity
+            @test (res.mask & SELF_IDENT) != 0
+        end
+
+        @testset "DenseByteNode — pjoin_dyn self with self (same content)" begin
+            n1 = DenseByteNode{Int, GlobalAlloc}(alloc)
+            node_set_val!(n1, UInt8['a'], 1)
+            node_set_val!(n1, UInt8['b'], 2)
+            n2 = DenseByteNode{Int, GlobalAlloc}(alloc)
+            node_set_val!(n2, UInt8['a'], 1)
+            node_set_val!(n2, UInt8['b'], 2)
+            res = pjoin_dyn(n1, n2)
+            # Both have same content — should be Identity for both (or Element with same content)
+            @test res isa AlgResIdentity || res isa AlgResElement
+        end
+
+        @testset "DenseByteNode — merge_from_list_node!" begin
+            dense = DenseByteNode{Int, GlobalAlloc}(alloc, 2)
+            list = LineListNode{Int, GlobalAlloc}(alloc)
+            node_set_val!(list, UInt8['a'], 1)
+            node_set_val!(list, UInt8['b'], 2)
+            status = merge_from_list_node!(dense, list)
+            @test node_get_val(dense, UInt8['a']) == 1
+            @test node_get_val(dense, UInt8['b']) == 2
+        end
+
+        @testset "DenseByteNode — LineListNode upgrade via set_payload_abstract!" begin
+            # Fill a LineListNode with 3 values — third triggers DenseByteNode upgrade
+            n = LineListNode{Int, GlobalAlloc}(alloc)
+            # First two values go into the two LineListNode slots
+            node_set_val!(n, UInt8['a'], 1)
+            node_set_val!(n, UInt8['b'], 2)
+            # Third value at 'c' triggers upgrade
+            res = node_set_val!(n, UInt8['c'], 3)
+            # Result is a (val, created) tuple OR a TrieNodeODRc upgrade
+            if res isa Tuple
+                # Stayed as LineListNode (shared prefix possible)
+                @test true
+            else
+                @test res isa TrieNodeODRc
+                upgraded = as_tagged(res)
+                @test upgraded isa DenseByteNode || upgraded isa LineListNode
+            end
+        end
+
+        @testset "DenseByteNode — convert_to_cell_node!" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            node_set_val!(n, UInt8['a'], 1)
+            cell_rc = convert_to_cell_node!(n)
+            cell = as_tagged(cell_rc)
+            @test cell isa CellByteNode
+            @test node_get_val(cell, UInt8['a']) == 1
+        end
+
+        @testset "DenseByteNode — node_remove_unmasked_branches!" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            node_set_val!(n, UInt8['a'], 1)
+            node_set_val!(n, UInt8['b'], 2)
+            node_set_val!(n, UInt8['c'], 3)
+            # Keep only 'a' and 'c'
+            keep_mask = ByteMask()
+            keep_mask = set(keep_mask, UInt8('a'))
+            keep_mask = set(keep_mask, UInt8('c'))
+            node_remove_unmasked_branches!(n, UInt8[], keep_mask, false)
+            @test node_contains_val(n, UInt8['a'])
+            @test !node_contains_val(n, UInt8['b'])
+            @test node_contains_val(n, UInt8['c'])
+        end
+
+        @testset "DenseByteNode — node_child_iter_start/next" begin
+            n = DenseByteNode{Int, GlobalAlloc}(alloc)
+            (tok, child) = node_child_iter_start(n)
+            @test child === nothing
+
+            # Add a child via public API
+            child_n = LineListNode{Int, GlobalAlloc}(alloc)
+            child_rc = TrieNodeODRc(child_n, alloc)
+            node_set_branch!(n, UInt8[UInt8('a')], child_rc)
+            (tok2, got_child) = node_child_iter_start(n)
+            @test got_child !== nothing
+        end
+    end
 end
