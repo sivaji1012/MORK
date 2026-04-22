@@ -1128,6 +1128,25 @@ using MORK
             @test r.mask & SELF_IDENT != 0
         end
 
+        @testset "LineListNode — pjoin_dyn(LLN, TinyRefNode) disjoint keys" begin
+            lln = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(lln, collect(UInt8, "abc"), 1)
+            tiny = TinyRefNode(false, collect(UInt8, "xyz"), ValOrChild(2), GlobalAlloc())
+            r = pjoin_dyn(lln, tiny)
+            @test r isa AlgResElement
+            m = PathMap{Int}(); m.root = r.value
+            @test get_val_at(m, collect(UInt8, "abc")) == 1
+            @test get_val_at(m, collect(UInt8, "xyz")) == 2
+        end
+
+        @testset "LineListNode — pjoin_dyn(LLN, TinyRefNode) same key same val → Identity" begin
+            lln = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(lln, collect(UInt8, "hi"), 5)
+            tiny = TinyRefNode(false, collect(UInt8, "hi"), ValOrChild(5), GlobalAlloc())
+            r = pjoin_dyn(lln, tiny)
+            @test r isa AlgResIdentity
+        end
+
         # ================================================================
         # factor_prefix! tests
         # ================================================================

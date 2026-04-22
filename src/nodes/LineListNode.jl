@@ -1593,7 +1593,9 @@ function pjoin_dyn(self::LineListNode{V,A}, other::AbstractTrieNode{V,A}) where 
         r = pjoin_dyn(other, self)   # ByteNode dispatches merge_from_list_node!
         return invert_identity(r)
     elseif tag == TINY_REF_NODE_TAG
-        error("LineListNode::pjoin_dyn(TinyRefNode) — TinyRefNode not yet ported")
+        # Delegate to TinyRefNode::pjoin_dyn(self) — mirrors Rust: tiny_node.pjoin_dyn(self.as_tagged())
+        # into_full() inside TinyRefNode::pjoin_dyn converts it to a LineListNode first.
+        pjoin_dyn(other, self)
     else
         error("LineListNode::pjoin_dyn — unknown node tag $tag")
     end
