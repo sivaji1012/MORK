@@ -2581,4 +2581,68 @@ using MORK
             @test tr_child_count(t) == 0
         end
     end
+
+    # ==================================================================
+    # ZipperTracking tests (ports zipper_tracking.rs)
+    # ==================================================================
+
+    @testset "ZipperTracking (ports zipper_tracking.rs)" begin
+
+        @testset "SharedTrackerPaths — default is empty" begin
+            stp = SharedTrackerPaths()
+            @test stp_path_status(stp, UInt8[]) == PATH_STATUS_AVAILABLE
+            @test stp_path_status(stp, collect(UInt8, "a")) == PATH_STATUS_AVAILABLE
+        end
+
+        @testset "write lock blocks overlapping write" begin
+            stp = SharedTrackerPaths()
+            path_a = collect(UInt8, "a")
+            t = ZipperTracker{TrackingWrite}(stp, path_a)
+            @test stp_path_status(stp, path_a) == PATH_STATUS_UNAVAILABLE
+            # Release
+            zt_release!(t)
+            @test stp_path_status(stp, path_a) == PATH_STATUS_AVAILABLE
+        end
+
+        @testset "read lock allows more reads, blocks writes" begin
+            stp = SharedTrackerPaths()
+            path_b = collect(UInt8, "b")
+            r1 = ZipperTracker{TrackingRead}(stp, path_b)
+            @test stp_path_status(stp, path_b) == PATH_STATUS_AVAILABLE_FOR_READ
+            # Second reader succeeds
+            r2 = ZipperTracker{TrackingRead}(stp, path_b)
+            @test stp_path_status(stp, path_b) == PATH_STATUS_AVAILABLE_FOR_READ
+            zt_release!(r1)
+            zt_release!(r2)
+            @test stp_path_status(stp, path_b) == PATH_STATUS_AVAILABLE
+        end
+
+        @testset "zt_path returns registered path" begin
+            stp = SharedTrackerPaths()
+            path = collect(UInt8, "hello")
+            t = ZipperTracker{TrackingWrite}(stp, path)
+            @test zt_path(t) == path
+            zt_release!(t)
+        end
+
+        @testset "Conflict thrown on overlapping write" begin
+            stp = SharedTrackerPaths()
+            path = collect(UInt8, "x")
+            t = ZipperTracker{TrackingWrite}(stp, path)
+            @test_throws Conflict ZipperTracker{TrackingWrite}(stp, path)
+            zt_release!(t)
+        end
+
+        @testset "zt_into_reader — write → read downgrade" begin
+            stp = SharedTrackerPaths()
+            path = collect(UInt8, "w")
+            tw = ZipperTracker{TrackingWrite}(stp, path)
+            @test stp_path_status(stp, path) == PATH_STATUS_UNAVAILABLE
+            tr = zt_into_reader(tw)   # tw is consumed
+            @test stp_path_status(stp, path) == PATH_STATUS_AVAILABLE_FOR_READ
+            zt_release!(tr)
+            @test stp_path_status(stp, path) == PATH_STATUS_AVAILABLE
+        end
+
+    end
 end

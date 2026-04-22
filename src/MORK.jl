@@ -69,6 +69,10 @@ include("WriteZipper.jl")
 # Ports pathmap/src/trie_ref.rs.
 include("TrieRef.jl")
 
+# Zipper path tracking for exclusive-access enforcement.
+# Ports pathmap/src/zipper_tracking.rs.
+include("ZipperTracking.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """
