@@ -73,6 +73,10 @@ include("TrieRef.jl")
 # Ports pathmap/src/zipper_tracking.rs.
 include("ZipperTracking.jl")
 
+# ZipperHead — coordinates multiple zippers into one PathMap.
+# Ports pathmap/src/zipper_head.rs.
+include("ZipperHead.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """

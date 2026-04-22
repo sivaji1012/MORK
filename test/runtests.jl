@@ -2645,4 +2645,80 @@ using MORK
         end
 
     end
+
+    # ==================================================================
+    # ZipperHead tests (mirrors zipper_head.rs tests)
+    # ==================================================================
+
+    @testset "ZipperHead (ports zipper_head.rs)" begin
+
+        @testset "zipper_head1: write and read back a value" begin
+            m = PathMap{Int}()
+            zh = zipper_head(m)
+            z = zh_write_zipper_at_exclusive_path(zh, [UInt8(0)])
+            wzt_set_val!(z, 0)
+            wzt_release!(z)
+            @test get_val_at(m, [UInt8(0)]) == 0
+        end
+
+        @testset "zipper_head2: write via zipper at root" begin
+            m = PathMap{Int}()
+            zh = zipper_head(m)
+            z = zh_write_zipper_at_exclusive_path(zh, UInt8[])
+            wzt_descend_to!(z, collect(UInt8, "test"))
+            wzt_set_val!(z, 0)
+            wzt_release!(z)
+            @test get_val_at(m, collect(UInt8, "test")) == 0
+        end
+
+        @testset "zipper_head3: multi-byte path creation" begin
+            m = PathMap{Int}()
+            zh = zipper_head(m)
+            z = zh_write_zipper_at_exclusive_path(zh, collect(UInt8, "test"))
+            wzt_descend_to!(z, collect(UInt8, ":2"))
+            wzt_set_val!(z, 2)
+            wzt_release!(z)
+            @test get_val_at(m, collect(UInt8, "test:2")) == 2
+        end
+
+        @testset "zipper_head4: existing path visible through zipper" begin
+            m = PathMap{Int}()
+            set_val_at!(m, collect(UInt8, "test:3"), 3)
+            zh = zipper_head(m)
+            z = zh_write_zipper_at_exclusive_path(zh, collect(UInt8, "test"))
+            wzt_descend_to!(z, collect(UInt8, ":3"))
+            @test wzt_path_exists(z)
+            @test wzt_get_val(z) == 3
+            wzt_set_val!(z, 33)
+            wzt_release!(z)
+            @test get_val_at(m, collect(UInt8, "test:3")) == 33
+        end
+
+        @testset "exclusive path conflict detection" begin
+            m = PathMap{Int}()
+            zh = zipper_head(m)
+            z = zh_write_zipper_at_exclusive_path(zh, collect(UInt8, "a"))
+            @test_throws Conflict zh_write_zipper_at_exclusive_path(zh, collect(UInt8, "a"))
+            wzt_release!(z)
+            # After release, same path is available again
+            z2 = zh_write_zipper_at_exclusive_path(zh, collect(UInt8, "a"))
+            wzt_set_val!(z2, 1)
+            wzt_release!(z2)
+            @test get_val_at(m, collect(UInt8, "a")) == 1
+        end
+
+        @testset "non-overlapping paths can coexist" begin
+            m = PathMap{Int}()
+            zh = zipper_head(m)
+            za = zh_write_zipper_at_exclusive_path(zh, collect(UInt8, "a"))
+            zb = zh_write_zipper_at_exclusive_path(zh, collect(UInt8, "b"))
+            wzt_set_val!(za, 1)
+            wzt_set_val!(zb, 2)
+            wzt_release!(za)
+            wzt_release!(zb)
+            @test get_val_at(m, collect(UInt8, "a")) == 1
+            @test get_val_at(m, collect(UInt8, "b")) == 2
+        end
+
+    end
 end

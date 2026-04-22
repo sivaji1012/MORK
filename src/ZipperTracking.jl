@@ -78,11 +78,11 @@ conflict_path(c::Conflict) = c.at
 
 mutable struct TrackerPaths{A<:Allocator}
     read_paths    ::PathMap{UInt32, A}   # val = reader count (>0)
-    written_paths ::PathMap{Nothing, A}  # val = () sentinel (Nothing)
+    written_paths ::PathMap{Bool, A}     # val = true = write lock present
 end
 
 TrackerPaths(alloc::A) where {A<:Allocator} =
-    TrackerPaths{A}(PathMap{UInt32,A}(alloc), PathMap{Nothing,A}(alloc))
+    TrackerPaths{A}(PathMap{UInt32,A}(alloc), PathMap{Bool,A}(alloc))
 
 TrackerPaths() = TrackerPaths(GlobalAlloc())
 
@@ -120,14 +120,15 @@ exists at `path` or any descendant.  Returns `nothing` on success.
 Mirrors `check_for_write_conflict`.
 """
 function _check_for_write_conflict(path::AbstractVector{UInt8},
-                                    written_paths::PathMap) :: Union{Nothing, Conflict}
+                                    written_paths::PathMap{Bool}) :: Union{Nothing, Conflict}
     isempty(written_paths) && return nothing
-    # Check ancestor locks: any prefix of path (including empty = root_val)
+    # Check ancestor locks: any prefix of path has a stored Bool=true lock
     for i in 0:length(path)
         prefix = view(path, 1:i)
-        path_exists_at(written_paths, prefix) && return _write_conflict(collect(prefix))
+        z = read_zipper_at_path(written_paths, prefix)
+        zipper_is_val(z) && return _write_conflict(collect(prefix))
     end
-    # Check descendant locks: any val in subtrie below path
+    # Check descendant locks: any val in subtrie at/below path
     z = write_zipper(written_paths)
     wz_descend_to!(z, path)
     wz_val_count(z) > 0 && return _write_conflict(path)
@@ -142,11 +143,12 @@ Mirrors `check_for_read_conflict`.
 function _check_for_read_conflict(path::AbstractVector{UInt8},
                                    read_paths::PathMap{UInt32}) :: Union{Nothing, Conflict}
     isempty(read_paths) && return nothing
-    # Check ancestor locks
+    # Check ancestor locks: any prefix of path has a stored UInt32 count
     for i in 0:length(path)
         prefix = view(path, 1:i)
-        if path_exists_at(read_paths, prefix)
-            v = get_val_at(read_paths, prefix)
+        z = read_zipper_at_path(read_paths, prefix)
+        if zipper_is_val(z)
+            v = zipper_val(z)
             v !== nothing && return _read_conflict(v, collect(prefix))
         end
     end
@@ -176,7 +178,7 @@ function stp_try_add_writer!(stp::SharedTrackerPaths, path::AbstractVector{UInt8
         c !== nothing && return c
         c = _check_for_read_conflict(path, paths.read_paths)
         c !== nothing && return c
-        set_val_at!(paths.written_paths, path, nothing)
+        set_val_at!(paths.written_paths, path, true)
         nothing
     end
 end
@@ -221,9 +223,9 @@ Mirrors `remove_lock` for `TrackingWrite`.
 """
 function stp_remove_writer!(stp::SharedTrackerPaths, path::AbstractVector{UInt8})
     _with_paths(stp) do paths
-        # Use path_exists_at: PathMap{Nothing} stores `nothing` as the value,
-        # so remove_val_at! returning nothing is ambiguous — existence check is authoritative.
-        !path_exists_at(paths.written_paths, path) && error("Write lock missing at path $(path)")
+        # PathMap{Bool}: get_val_at returns the Bool or nothing (not found)
+        get_val_at(paths.written_paths, path) === nothing &&
+            error("Write lock missing at path $(path)")
         remove_val_at!(paths.written_paths, path, true)
     end
 end
