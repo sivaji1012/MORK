@@ -267,6 +267,22 @@ end
 
 export TrieRefBorrowed, TrieRefOwned, TrieRef
 export trie_ref_at_path, tr_trie_ref_at_path, tr_make_map
+"""
+    tr_get_focus_anr(t::TrieRefBorrowed) → AbstractNodeRef
+
+Returns the `AbstractNodeRef` at the TrieRef's cursor position.
+Mirrors `ZipperInfallibleSubtries::get_focus` for TrieRef.
+"""
+function tr_get_focus_anr(t::TrieRefBorrowed{V,A}) where {V,A}
+    _tr_is_valid(t) || return ANRNone{V,A}()
+    key = _tr_node_key(t)
+    if !isempty(key)
+        get_node_at_key(as_tagged(t.focus_node), key)
+    else
+        ANRBorrowedRc{V,A}(t.focus_node)
+    end
+end
+
 export tr_path_exists, tr_is_val, tr_get_val, tr_child_count, tr_child_mask
-export tr_fork_read_zipper, tr_get_focus_rc
+export tr_fork_read_zipper, tr_get_focus_rc, tr_get_focus_anr
 export _tr_is_valid, _tr_node_key, _tr_at_boundary, _tr_new_invalid

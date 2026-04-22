@@ -2383,6 +2383,98 @@ using MORK
         end
 
         # ==================================================================
+        # WriteZipper navigation (ZipperMoving trait — write_zipper.rs:976)
+        # ==================================================================
+
+        @testset "wz_child_mask / wz_child_count at root" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "ab"), 1)
+            set_val_at!(m, collect(UInt8, "ac"), 2)
+            z = write_zipper(m)
+            # Root has one child: 'a' (0x61)
+            @test wz_child_count(z) == 1
+            mask = wz_child_mask(z)
+            @test test_bit(mask, UInt8('a'))
+        end
+
+        @testset "wz_descend_first_byte! / wz_ascend_byte!" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "a"), 1)
+            set_val_at!(m, collect(UInt8, "b"), 2)
+            z = write_zipper(m)
+
+            @test wz_descend_first_byte!(z)
+            @test last(wz_path(z)) == UInt8('a')
+            @test wz_ascend_byte!(z)
+            @test isempty(wz_path(z))
+        end
+
+        @testset "wz_to_next_sibling_byte!" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "a"), 1)
+            set_val_at!(m, collect(UInt8, "b"), 2)
+            set_val_at!(m, collect(UInt8, "c"), 3)
+            z = write_zipper(m)
+
+            @test wz_descend_first_byte!(z)
+            @test last(wz_path(z)) == UInt8('a')
+            @test wz_to_next_sibling_byte!(z)
+            @test last(wz_path(z)) == UInt8('b')
+            @test wz_to_next_sibling_byte!(z)
+            @test last(wz_path(z)) == UInt8('c')
+            @test !wz_to_next_sibling_byte!(z)   # already last
+            @test last(wz_path(z)) == UInt8('c')  # unchanged
+        end
+
+        @testset "wz_reset!" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "abc"), 1)
+            z = write_zipper(m)
+            wz_descend_to!(z, collect(UInt8, "abc"))
+            @test !isempty(wz_path(z))
+            wz_reset!(z)
+            @test isempty(wz_path(z))
+        end
+
+        @testset "wz_val_count" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "a"), 1)
+            set_val_at!(m, collect(UInt8, "b"), 2)
+            set_val_at!(m, collect(UInt8, "ba"), 3)
+            z = write_zipper(m)
+            @test wz_val_count(z) == 3
+
+            # After descending into "b", should see 2 vals
+            wz_descend_to!(z, [UInt8('b')])
+            @test wz_val_count(z) == 2
+        end
+
+        @testset "wz_take_focus!" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "ab"), 1)
+            set_val_at!(m, collect(UInt8, "ac"), 2)
+            z = write_zipper(m)
+
+            rc = wz_take_focus!(z, false)
+            @test rc !== nothing
+            # After take, subtrie at cursor is gone
+            @test wz_val_count(z) == 0
+        end
+
+        @testset "tr_get_focus_anr" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "x"), 5)
+            # Empty path → at root boundary, node_key is empty → ANRBorrowedRc
+            t = trie_ref_at_path(m, UInt8[])
+            anr = tr_get_focus_anr(t)
+            @test !is_none(anr)
+            # Val key "x" → get_node_at_key finds no child, returns ANRNone (mirrors upstream)
+            t2 = trie_ref_at_path(m, collect(UInt8, "x"))
+            anr2 = tr_get_focus_anr(t2)
+            @test is_none(anr2)
+        end
+
+        # ==================================================================
         # TrieRef tests (mirrors trie_ref_test1 + trie_ref_test2 in upstream)
         # ==================================================================
 

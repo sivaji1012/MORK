@@ -267,12 +267,12 @@ Ascend `steps` bytes toward the zipper root.  Returns `true` on success,
 """
 function wz_ascend!(z::WriteZipperCore, steps::Int=1)
     while true
-        nk = _wz_node_key(z)
-        if isempty(nk)
-            # node_key is 0 → pop up one ancestor level
-            isempty(z.prefix_idx) && return false  # truly at root
-            pop!(z.focus_stack)
-            pop!(z.prefix_idx)
+        if isempty(_wz_node_key(z))
+            # ascend_across_nodes: pop ancestor level if possible (no-op at root)
+            if !isempty(z.prefix_idx)
+                pop!(z.focus_stack)
+                pop!(z.prefix_idx)
+            end
         end
         steps == 0 && return true
         _wz_at_root(z) && return false
@@ -697,6 +697,208 @@ end
 # Exports
 # =====================================================================
 
+# =====================================================================
+# ZipperMoving — navigation trait methods
+# =====================================================================
+#
+# Ports WriteZipperCore ZipperMoving impl (write_zipper.rs:976-1075)
+# and the ZipperMoving default methods in zipper.rs:232-420.
+# All rely on _wz_node_key, wz_descend_to!, wz_ascend!, wz_child_mask.
+
+"""
+    wz_at_root(z) → Bool
+
+True iff the zipper is at its origin root (path length == origin_path_len).
+Mirrors `ZipperMoving::at_root`.
+"""
+@inline wz_at_root(z::WriteZipperCore) = length(z.prefix_buf) <= z.origin_path_len
+
+"""
+    wz_reset!(z) → nothing
+
+Reset the zipper to its origin root.
+Mirrors `WriteZipperCore::reset` (write_zipper.rs:982).
+"""
+function wz_reset!(z::WriteZipperCore{V,A}) where {V,A}
+    # Pop back to root frame
+    while length(z.focus_stack) > 1
+        pop!(z.focus_stack)
+    end
+    resize!(z.prefix_buf, z.origin_path_len)
+    empty!(z.prefix_idx)
+    nothing
+end
+
+"""
+    wz_child_mask(z) → ByteMask
+
+Returns a `ByteMask` of which byte-branches exist at the cursor position.
+Mirrors `WriteZipperCore::child_mask` (write_zipper.rs:922).
+"""
+function wz_child_mask(z::WriteZipperCore{V,A}) where {V,A}
+    isempty(z.focus_stack) && return ByteMask()
+    focus_node = z.focus_stack[end].node
+    nk = collect(_wz_node_key(z))
+    if isempty(nk)
+        return node_branches_mask(focus_node, UInt8[])
+    end
+    result = node_get_child(focus_node, nk)
+    if result !== nothing
+        consumed, child_rc = result
+        child_node = as_tagged(child_rc)
+        if length(nk) >= consumed
+            return node_branches_mask(child_node, nk[consumed+1:end])
+        else
+            return ByteMask()
+        end
+    end
+    node_branches_mask(focus_node, nk)
+end
+
+"""
+    wz_child_count(z) → Int
+
+Returns the number of byte-branches at the cursor position.
+Mirrors `WriteZipperCore::child_count` (write_zipper.rs:914).
+"""
+function wz_child_count(z::WriteZipperCore{V,A}) where {V,A}
+    isempty(z.focus_stack) && return 0
+    focus_node = z.focus_stack[end].node
+    nk = collect(_wz_node_key(z))
+    count_branches(focus_node, nk)
+end
+
+"""
+    wz_val_count(z) → Int
+
+Returns the number of values in the subtrie rooted at the cursor.
+Mirrors `WriteZipperCore::val_count` (write_zipper.rs:997).
+"""
+function wz_val_count(z::WriteZipperCore{V,A}) where {V,A}
+    root_val = wz_is_val(z) ? 1 : 0
+    focus_anr = _wz_get_focus_anr(z)
+    is_none(focus_anr) && return root_val
+    val_count_below_root(as_tagged(focus_anr)) + root_val
+end
+
+"""
+    wz_descend_to_byte!(z, k::UInt8) → nothing
+
+Descend the cursor one byte into child `k`.
+Default impl: descend_to([k]).  Mirrors ZipperMoving::descend_to_byte.
+"""
+@inline function wz_descend_to_byte!(z::WriteZipperCore, k::UInt8)
+    wz_descend_to!(z, UInt8[k])
+end
+
+"""
+    wz_descend_indexed_byte!(z, idx::Int) → Bool
+
+Descend to the `idx`-th child (0-based) in byte order.
+Returns `false` if `idx >= child_count`.
+Mirrors ZipperMoving::descend_indexed_byte (zipper.rs:256).
+"""
+function wz_descend_indexed_byte!(z::WriteZipperCore, idx::Int)
+    mask = wz_child_mask(z)
+    child_byte = indexed_bit(mask, idx, true)
+    child_byte === nothing && return false
+    wz_descend_to_byte!(z, child_byte)
+    true
+end
+
+"""
+    wz_descend_first_byte!(z) → Bool
+
+Descend to the first (lexicographically smallest) child.
+Mirrors ZipperMoving::descend_first_byte (zipper.rs:279).
+"""
+@inline wz_descend_first_byte!(z::WriteZipperCore) = wz_descend_indexed_byte!(z, 0)
+
+"""
+    wz_ascend_byte!(z) → Bool
+
+Ascend exactly one byte.  Returns `false` if already at root.
+Mirrors ZipperMoving::ascend_byte (zipper.rs:340).
+"""
+@inline wz_ascend_byte!(z::WriteZipperCore) = wz_ascend!(z, 1)
+
+"""
+    wz_to_next_sibling_byte!(z) → Bool
+
+Move to the next sibling byte at the same depth.
+Returns `false` if already the last sibling.
+Mirrors ZipperMoving::to_next_sibling_byte (zipper.rs:364).
+"""
+function wz_to_next_sibling_byte!(z::WriteZipperCore)
+    cur_path = wz_path(z)
+    isempty(cur_path) && return false
+    cur_byte = last(cur_path)
+    !wz_ascend_byte!(z) && return false
+    mask = wz_child_mask(z)
+    next = next_bit(mask, cur_byte)
+    if next !== nothing
+        wz_descend_to_byte!(z, next)
+        return true
+    else
+        wz_descend_to_byte!(z, cur_byte)
+        return false
+    end
+end
+
+"""
+    wz_to_prev_sibling_byte!(z) → Bool
+
+Move to the previous sibling byte at the same depth.
+Returns `false` if already the first sibling.
+Mirrors ZipperMoving::to_prev_sibling_byte (zipper.rs:395).
+"""
+function wz_to_prev_sibling_byte!(z::WriteZipperCore)
+    cur_path = wz_path(z)
+    isempty(cur_path) && return false
+    cur_byte = last(cur_path)
+    !wz_ascend_byte!(z) && return false
+    mask = wz_child_mask(z)
+    prev = prev_bit(mask, cur_byte)
+    if prev !== nothing
+        wz_descend_to_byte!(z, prev)
+        return true
+    else
+        wz_descend_to_byte!(z, cur_byte)
+        return false
+    end
+end
+
+"""
+    wz_take_focus!(z, prune=false) → Union{Nothing, TrieNodeODRc}
+
+Remove and return the subtrie at the cursor.
+If `prune`, empty ancestor paths are pruned.
+Mirrors `WriteZipperCore::take_focus` (write_zipper.rs:2057).
+"""
+function wz_take_focus!(z::WriteZipperCore{V,A}, prune::Bool=false) where {V,A}
+    focus_anr = _wz_get_focus_anr(z)
+    is_none(focus_anr) && return nothing
+    rc = into_option(focus_anr)
+    rc === nothing && return nothing
+    _wz_graft_internal!(z, nothing)
+    rc
+end
+
+"""
+    wz_take_map!(z, prune=false) → Union{Nothing, PathMap}
+
+Remove and return a PathMap snapshot at the cursor.
+Mirrors `WriteZipperCore::take_map` (write_zipper.rs:1973).
+"""
+function wz_take_map!(z::WriteZipperCore{V,A}, prune::Bool=false) where {V,A}
+    root_node = wz_take_focus!(z, prune)
+    root_node === nothing ? nothing : PathMap{V,A}(z.alloc, root_node, nothing)
+end
+
+# =====================================================================
+# Exports
+# =====================================================================
+
 export WriteZipperCore, WriteZipperUntracked
 export _wz_at_root, _wz_node_key, _wz_node_key_start
 export wz_set_val!, wz_remove_val!
@@ -708,3 +910,10 @@ export _wz_get_focus_anr, _wz_graft_internal!, _wz_remove_branches!
 export wz_graft!, wz_graft_map!
 export wz_join_into!, wz_join_map_into!
 export wz_meet_into!, wz_subtract_into!, wz_restrict!
+export wz_at_root, wz_reset!
+export wz_child_mask, wz_child_count, wz_val_count
+export wz_descend_to_byte!, wz_descend_indexed_byte!
+export wz_descend_first_byte!, wz_ascend_byte!
+export wz_to_next_sibling_byte!, wz_to_prev_sibling_byte!
+export wz_take_focus!, wz_take_map!
+export tr_get_focus_anr
