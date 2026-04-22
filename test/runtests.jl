@@ -519,5 +519,123 @@ using MORK
             r = join_all([UInt32(5), UInt32(5), UInt32(5)])
             @test is_identity(r) || is_element(r)
         end
+
+        @testset "Ints — PathInteger alias" begin
+            @test UInt8  <: PathInteger
+            @test UInt16 <: PathInteger
+            @test UInt32 <: PathInteger
+            @test UInt64 <: PathInteger
+            @test UInt128 <: PathInteger
+            # sizeof recovers NUM_SIZE
+            @test sizeof(UInt8)   == 1
+            @test sizeof(UInt16)  == 2
+            @test sizeof(UInt32)  == 4
+            @test sizeof(UInt64)  == 8
+            @test sizeof(UInt128) == 16
+        end
+
+        @testset "Ints — bob_and_weave_simple (upstream port)" begin
+            # Port of pathmap/src/utils/ints.rs:376-412
+            is_orig = UInt64[10, 30, 100]
+            is_decoded = zeros(UInt64, 3)
+            weave = UInt8[]
+            bob   = UInt8[]
+            indices_to_weave!(weave, is_orig, 8)
+            weave_to_indices!(is_decoded, weave)
+            @test is_decoded == is_orig
+
+            fill!(is_decoded, 0)
+            indices_to_bob!(bob, is_orig)
+            bob_to_indices!(is_decoded, bob)
+            @test is_decoded == is_orig
+
+            # Second case: multi-byte values
+            is_orig = UInt64[3333, 30, 1000]
+            is_decoded = zeros(UInt64, 3)
+            weave = UInt8[]
+            bob   = UInt8[]
+            indices_to_weave!(weave, is_orig, 8)
+            weave_to_indices!(is_decoded, weave)
+            @test is_decoded == is_orig
+
+            fill!(is_decoded, 0)
+            indices_to_bob!(bob, is_orig)
+            bob_to_indices!(is_decoded, bob)
+            @test is_decoded == is_orig
+        end
+
+        @testset "Ints — BOB shape guarantees" begin
+            # steps == max bit-width across xs
+            bob = UInt8[]
+            steps = indices_to_bob!(bob, UInt64[10, 30, 100])
+            # 100 = 0b1100100 (7 bits) — widest
+            @test steps == 7
+            @test length(bob) == 7
+
+            # Empty xs → steps == 0
+            bob = UInt8[]
+            steps = indices_to_bob!(bob, UInt64[])
+            @test steps == 0
+            @test isempty(bob)
+
+            # All zeros → steps == 0
+            bob = UInt8[]
+            steps = indices_to_bob!(bob, UInt64[0, 0, 0])
+            @test steps == 0
+            @test isempty(bob)
+
+            # Single zero-valued element
+            bob = UInt8[]
+            steps = indices_to_bob!(bob, UInt64[0])
+            @test steps == 0
+
+            # Single element = 1 → one plane
+            bob = UInt8[]
+            steps = indices_to_bob!(bob, UInt64[1])
+            @test steps == 1
+            @test bob == UInt8[1]
+        end
+
+        @testset "Ints — weave shape guarantees" begin
+            # Writes num_size bytes per element
+            weave = UInt8[]
+            indices_to_weave!(weave, UInt64[10, 30, 100], 8)
+            @test length(weave) == 8 * 3
+
+            # num_size == 1: single-byte round-robin
+            weave = UInt8[]
+            indices_to_weave!(weave, UInt8[10, 30, 100], 1)
+            @test length(weave) == 3
+            @test weave == UInt8[10, 30, 100]
+
+            # num_size == 2: two-byte big-endian round-robin
+            weave = UInt8[]
+            indices_to_weave!(weave, UInt16[0x0D05, 0x001E, 0x03E8], 2)
+            # plane c=1 (high bytes): 0x0D, 0x00, 0x03
+            # plane c=0 (low  bytes): 0x05, 0x1E, 0xE8
+            @test weave == UInt8[0x0D, 0x00, 0x03, 0x05, 0x1E, 0xE8]
+        end
+
+        @testset "Ints — BOB across integer widths" begin
+            for T in (UInt8, UInt16, UInt32, UInt64, UInt128)
+                orig    = T[T(5), T(10), T(17)]
+                decoded = zeros(T, 3)
+                bob     = UInt8[]
+                indices_to_bob!(bob, orig)
+                bob_to_indices!(decoded, bob)
+                @test decoded == orig
+            end
+        end
+
+        @testset "Ints — weave across integer widths" begin
+            for T in (UInt8, UInt16, UInt32, UInt64)
+                orig    = T[T(5), T(10), T(17), T(255)]
+                decoded = zeros(T, 4)
+                weave   = UInt8[]
+                indices_to_weave!(weave, orig, sizeof(T))
+                weave_to_indices!(decoded, weave)
+                @test decoded == orig
+            end
+        end
     end
 end

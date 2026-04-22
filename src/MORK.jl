@@ -28,6 +28,10 @@ include("Ring.jl")
 # Ports pathmap/src/utils/mod.rs.
 include("utils/Utils.jl")
 
+# Integer encoding utilities (BOB + weave). Range generators deferred
+# until PathMap lands (see Ints.jl header). Ports pathmap/src/utils/ints.rs.
+include("utils/Ints.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """
