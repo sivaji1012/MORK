@@ -1346,8 +1346,240 @@ function take_node_at_key!(n::LineListNode{V,A}, key::AbstractVector{UInt8}, pru
 end
 
 # =====================================================================
+# merge_list_nodes helpers
+# =====================================================================
+#
+# Ports Rust line_list_node.rs: try_merge, merge_guts, merge_list_nodes,
+# merge_into_list_nodes (lines 1263-1609).
+#
+# Rust uses const-generic slot indices; Julia uses explicit Int slot args.
+
+@inline _lln_is_child(n::LineListNode, slot::Int) = slot == 0 ? is_child_0(n) : is_child_1(n)
+@inline _lln_is_val(n::LineListNode, slot::Int)   = slot == 0 ? is_value_0(n) : is_value_1(n)
+@inline _lln_is_used(n::LineListNode, slot::Int)  = slot == 0 ? is_used_0(n)  : is_used_1(n)
+@inline _lln_get_child(n::LineListNode, slot::Int) = into_child(slot == 0 ? n.slot0 : n.slot1)
+@inline _lln_get_val(n::LineListNode, slot::Int)   = into_val(slot == 0 ? n.slot0 : n.slot1)
+@inline _lln_key(n::LineListNode, slot::Int)       = slot == 0 ? n.key0 : n.key1
+@inline _lln_clone_payload(n::LineListNode, slot::Int) =
+    slot == 0 ? clone_slot0_payload(n) : clone_slot1_payload(n)
+
+# _try_merge: attempt to merge one slot from each node.
+# Returns AlgResElement{Tuple{Vector{UInt8}, ValOrChild}} | AlgResIdentity | AlgResNone
+function _try_merge(a_key, a::LineListNode{V,A}, a_slot::Int,
+                    b_key, b::LineListNode{V,A}, b_slot::Int) where {V,A}
+    overlap = find_prefix_overlap(a_key, b_key)
+    overlap > 0 ? _merge_guts(overlap, a_key, a, a_slot, b_key, b, b_slot) : AlgResNone()
+end
+
+# _merge_guts: the substance of slot-pair merging.
+# Mirrors merge_guts (line 1273).
+function _merge_guts(overlap::Int, a_key, a::LineListNode{V,A}, a_slot::Int,
+                     b_key, b::LineListNode{V,A}, b_slot::Int) where {V,A}
+    a_key_len = length(a_key)
+    b_key_len = length(b_key)
+
+    # Identical keys: join payloads directly.
+    # r.map(f) in Rust preserves AlgResIdentity without calling f — mirror that here.
+    if overlap == a_key_len && overlap == b_key_len
+        if _lln_is_child(a, a_slot) && _lln_is_child(b, b_slot)
+            a_child = _lln_get_child(a, a_slot)
+            b_child = _lln_get_child(b, b_slot)
+            r = pjoin(a_child, b_child)
+            if r isa AlgResElement
+                return AlgResElement{Tuple{Vector{UInt8},ValOrChild{V,A}}}(
+                    (Vector{UInt8}(a_key), ValOrChild(r.value)))
+            elseif r isa AlgResIdentity
+                return AlgResIdentity(r.mask)
+            else  # AlgResNone
+                return AlgResNone()
+            end
+        elseif _lln_is_val(a, a_slot) && _lln_is_val(b, b_slot)
+            a_val = _lln_get_val(a, a_slot)
+            b_val = _lln_get_val(b, b_slot)
+            r = pjoin(a_val, b_val)
+            if r isa AlgResElement
+                return AlgResElement{Tuple{Vector{UInt8},ValOrChild{V,A}}}(
+                    (Vector{UInt8}(a_key), ValOrChild(r.value)))
+            elseif r isa AlgResIdentity
+                return AlgResIdentity(r.mask)
+            else
+                return AlgResNone()
+            end
+        end
+        # one is child, one is val — fall through
+    end
+
+    # b shorter + child: split a, merge intermediate with b's child
+    if b_key_len == overlap && _lln_is_child(b, b_slot) && a_key_len > overlap
+        a_payload   = _lln_clone_payload(a, a_slot)
+        b_child     = _lln_get_child(b, b_slot)
+        inter       = LineListNode{V,A}(a.alloc)
+        set_slot0!(inter, a_key[overlap+1:end], a_payload)
+        inter_rc    = TrieNodeODRc(inter, a.alloc)
+        joined_r    = pjoin(b_child, inter_rc)
+        joined = if joined_r isa AlgResElement
+            joined_r.value
+        elseif joined_r isa AlgResIdentity
+            (joined_r.mask & SELF_IDENT != 0) ? b_child : inter_rc
+        else
+            return AlgResNone()
+        end
+        return AlgResElement{Tuple{Vector{UInt8},ValOrChild{V,A}}}(
+            (Vector{UInt8}(a_key[1:overlap]), ValOrChild(joined)))
+    end
+
+    # a shorter + child: split b, merge intermediate with a's child
+    if a_key_len == overlap && _lln_is_child(a, a_slot) && b_key_len > overlap
+        b_payload   = _lln_clone_payload(b, b_slot)
+        a_child     = _lln_get_child(a, a_slot)
+        inter       = LineListNode{V,A}(a.alloc)
+        set_slot0!(inter, b_key[overlap+1:end], b_payload)
+        inter_rc    = TrieNodeODRc(inter, a.alloc)
+        joined_r    = pjoin(a_child, inter_rc)
+        joined = if joined_r isa AlgResElement
+            joined_r.value
+        elseif joined_r isa AlgResIdentity
+            (joined_r.mask & SELF_IDENT != 0) ? a_child : inter_rc
+        else
+            return AlgResNone()
+        end
+        return AlgResElement{Tuple{Vector{UInt8},ValOrChild{V,A}}}(
+            (Vector{UInt8}(a_key[1:overlap]), ValOrChild(joined)))
+    end
+
+    # Shared prefix node: build a LineListNode at common prefix, two slots beyond it
+    local eff_overlap = overlap
+    if eff_overlap == a_key_len || eff_overlap == b_key_len
+        eff_overlap -= 1
+    end
+    if eff_overlap > 0
+        new_n       = LineListNode{V,A}(a.alloc)
+        a_payload   = _lln_clone_payload(a, a_slot)
+        b_payload   = _lln_clone_payload(b, b_slot)
+        new_a_key   = a_key[eff_overlap+1:end]
+        new_b_key   = b_key[eff_overlap+1:end]
+        if should_swap_keys(new_a_key, new_b_key)
+            set_slot0!(new_n, new_b_key, b_payload)
+            set_slot1!(new_n, new_a_key, a_payload)
+        else
+            set_slot0!(new_n, new_a_key, a_payload)
+            set_slot1!(new_n, new_b_key, b_payload)
+        end
+        return AlgResElement{Tuple{Vector{UInt8},ValOrChild{V,A}}}(
+            (Vector{UInt8}(a_key[1:eff_overlap]),
+             ValOrChild(TrieNodeODRc(new_n, a.alloc))))
+    end
+
+    AlgResNone()
+end
+
+# merge_list_nodes: join two LineListNodes into either a new LineListNode (≤2 entries)
+# or a DenseByteNode (>2 entries).
+# Returns AlgebraicResult{TrieNodeODRc{V,A}}.
+# Ports Rust merge_list_nodes (line 1377) + merge_into_list_nodes (line 1590).
+function merge_list_nodes(a::LineListNode{V,A}, b::LineListNode{V,A}) where {V,A}
+    (ak0, ak1) = (a.key0, a.key1)
+    (bk0, bk1) = (b.key0, b.key1)
+    # entries: (key, payload) pairs; identity_masks[i] = which arg was identity for entry i
+    entries       = Vector{Tuple{Vector{UInt8}, ValOrChild{V,A}}}()
+    identity_masks = UInt64[]
+    used = falses(4)  # [a_slot0, a_slot1, b_slot0, b_slot1]
+
+    function record!(r, a_idx::Int, b_idx::Int)
+        if r isa AlgResElement
+            push!(entries, r.value); push!(identity_masks, UInt64(0))
+            used[a_idx+1] = true; used[b_idx+1] = true
+            return true
+        elseif r isa AlgResIdentity
+            mask = r.mask
+            b_slot = b_idx - 2  # b_idx is used-array index (2 or 3); convert to slot (0 or 1)
+            pair = if mask & SELF_IDENT != 0
+                (_lln_key(a, a_idx), _lln_clone_payload(a, a_idx))
+            else
+                (_lln_key(b, b_slot), _lln_clone_payload(b, b_slot))
+            end
+            push!(entries, (Vector{UInt8}(pair[1]), pair[2])); push!(identity_masks, mask)
+            used[a_idx+1] = true; used[b_idx+1] = true
+            return true
+        end
+        false
+    end
+
+    # Try all 4 pairings (Rust processes (0,0),(0,1),(1,0),(1,1) in order)
+    if _lln_is_used(a, 0) && _lln_is_used(b, 0)
+        record!(_try_merge(ak0, a, 0, bk0, b, 0), 0, 2)
+    end
+    if !used[1] && !used[3] && _lln_is_used(a, 0) && _lln_is_used(b, 1)
+        record!(_try_merge(ak0, a, 0, bk1, b, 1), 0, 3)
+    end
+    if !used[2] && _lln_is_used(a, 1) && _lln_is_used(b, 0)
+        record!(_try_merge(ak1, a, 1, bk0, b, 0), 1, 2)
+    end
+    if !used[2] && !used[4] && _lln_is_used(a, 1) && _lln_is_used(b, 1)
+        record!(_try_merge(ak1, a, 1, bk1, b, 1), 1, 3)
+    end
+
+    # Add un-merged single entries
+    for (a_idx, a_key) in ((0, ak0), (1, ak1))
+        !used[a_idx+1] && _lln_is_used(a, a_idx) && begin
+            p = _lln_clone_payload(a, a_idx)
+            p !== nothing && begin
+                push!(entries, (Vector{UInt8}(a_key), p))
+                push!(identity_masks, SELF_IDENT)
+            end
+        end
+    end
+    for (b_idx, b_key) in ((0, bk0), (1, bk1))
+        !used[b_idx+3] && _lln_is_used(b, b_idx) && begin
+            p = _lln_clone_payload(b, b_idx)
+            p !== nothing && begin
+                push!(entries, (Vector{UInt8}(b_key), p))
+                push!(identity_masks, COUNTER_IDENT)
+            end
+        end
+    end
+
+    n = length(entries)
+
+    # ≤ 2 entries → stays as LineListNode
+    if n <= 2
+        n == 0 && return AlgResNone()
+        new_node = LineListNode{V,A}(a.alloc)
+        if n == 1
+            imask = identity_masks[1]
+            imask != 0 && return AlgResIdentity(imask)
+            set_slot0!(new_node, entries[1][1], entries[1][2])
+            return AlgResElement{TrieNodeODRc{V,A}}(TrieNodeODRc(new_node, a.alloc))
+        else  # n == 2
+            imask = identity_masks[1] & identity_masks[2]
+            imask != 0 && return AlgResIdentity(imask)
+            (k0, p0), (k1, p1) = entries[1], entries[2]
+            if should_swap_keys(k0, k1)
+                set_slot0!(new_node, k1, p1); set_slot1!(new_node, k0, p0)
+            else
+                set_slot0!(new_node, k0, p0); set_slot1!(new_node, k1, p1)
+            end
+            return AlgResElement{TrieNodeODRc{V,A}}(TrieNodeODRc(new_node, a.alloc))
+        end
+    end
+
+    # > 2 entries → upgrade to DenseByteNode
+    dense = DenseByteNode{V,A}(a.alloc, n)
+    for (key, payload) in entries
+        k0 = key[1]
+        if length(key) > 1
+            child_lln = LineListNode{V,A}(a.alloc)
+            set_slot0!(child_lln, key[2:end], payload)
+            _bn_join_child_into!(dense, k0, TrieNodeODRc(child_lln, a.alloc))
+        else
+            _bn_set_payload_owned!(dense, k0, payload)
+        end
+    end
+    AlgResElement{TrieNodeODRc{V,A}}(TrieNodeODRc(dense, a.alloc))
+end
+
+# =====================================================================
 # Lattice operations
-# (DenseByteNode dispatch paths stubbed until DenseByteNode is ported)
 # =====================================================================
 
 function pjoin_dyn(self::LineListNode{V,A}, other::AbstractTrieNode{V,A}) where {V,A}
@@ -1355,8 +1587,7 @@ function pjoin_dyn(self::LineListNode{V,A}, other::AbstractTrieNode{V,A}) where 
     if tag == EMPTY_NODE_TAG
         return AlgResIdentity(SELF_IDENT)
     elseif tag == LINE_LIST_NODE_TAG
-        # same type → merge_list_nodes equivalent (deferred until full impl)
-        error("LineListNode::pjoin_dyn(LineListNode) — merge_list_nodes not yet ported")
+        return merge_list_nodes(self, other)
     elseif tag == DENSE_BYTE_NODE_TAG || tag == CELL_BYTE_NODE_TAG
         # LineListNode joins into a DenseByteNode: clone the ByteNode and merge self into it
         r = pjoin_dyn(other, self)   # ByteNode dispatches merge_from_list_node!
@@ -1372,7 +1603,18 @@ function join_into_dyn!(self::LineListNode{V,A}, other::TrieNodeODRc{V,A}) where
     is_empty_node(other) && return (ALG_STATUS_IDENTITY, nothing)
     other_tag = node_tag(as_tagged(other))
     if other_tag == LINE_LIST_NODE_TAG
-        error("LineListNode::join_into_dyn!(LineListNode) — merge_into_list_nodes not yet ported")
+        r = merge_list_nodes(self, as_tagged(other))
+        if r isa AlgResElement
+            return (ALG_STATUS_ELEMENT, r.value)  # new node (may be dense or list)
+        elseif r isa AlgResIdentity
+            if r.mask & SELF_IDENT != 0
+                return (ALG_STATUS_IDENTITY, nothing)   # self unchanged
+            else
+                return (ALG_STATUS_ELEMENT, other)       # other won
+            end
+        else
+            return (ALG_STATUS_NONE, nothing)
+        end
     elseif other_tag == DENSE_BYTE_NODE_TAG || other_tag == CELL_BYTE_NODE_TAG
         # Merge self (LineListNode) into the DenseByteNode
         other_node = as_tagged(other)

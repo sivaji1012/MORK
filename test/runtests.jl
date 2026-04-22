@@ -1039,6 +1039,95 @@ using MORK
             @test res.mask == SELF_IDENT
         end
 
+        @testset "LineListNode — pjoin_dyn(LLN,LLN) disjoint keys" begin
+            # Two nodes with completely different first bytes → DenseByteNode (>2 entries)
+            # Actually 2 disjoint entries → stays LineListNode
+            a = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(a, UInt8[0x61], 1)   # "a" → 1
+            b = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(b, UInt8[0x62], 2)   # "b" → 2
+            r = pjoin_dyn(a, b)
+            @test r isa AlgResElement
+            rc = r.value
+            joined = as_tagged(rc)
+            @test node_get_val(joined, UInt8[0x61]) == 1
+            @test node_get_val(joined, UInt8[0x62]) == 2
+        end
+
+        @testset "LineListNode — pjoin_dyn(LLN,LLN) identical key same val → Identity" begin
+            a = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(a, collect(UInt8, "hello"), 5)
+            b = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(b, collect(UInt8, "hello"), 5)
+            r = pjoin_dyn(a, b)
+            # pjoin(5, 5) on Int returns Identity(BOTH) — same value
+            @test r isa AlgResIdentity
+        end
+
+        @testset "LineListNode — pjoin_dyn(LLN,LLN) identical key different val → max" begin
+            # pjoin(3, 7) = max = 7 = b → AlgResIdentity(COUNTER_IDENT) meaning "use b"
+            a = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(a, collect(UInt8, "key"), 3)
+            b = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(b, collect(UInt8, "key"), 7)
+            r = pjoin_dyn(a, b)
+            @test r isa AlgResIdentity
+            @test r.mask == COUNTER_IDENT
+        end
+
+        @testset "LineListNode — pjoin_dyn(LLN,LLN) shared prefix builds intermediate node" begin
+            # "abc" and "abd" share "ab" prefix → new child node under "ab"
+            # node_get_val is local-only; use PathMap API to traverse the full path
+            a = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(a, collect(UInt8, "abc"), 1)
+            b = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(b, collect(UInt8, "abd"), 2)
+            r = pjoin_dyn(a, b)
+            @test r isa AlgResElement
+            # Wire into a PathMap so we can use get_val_at for full-path traversal
+            m = PathMap{Int}()
+            m.root = r.value
+            @test get_val_at(m, collect(UInt8, "abc")) == 1
+            @test get_val_at(m, collect(UInt8, "abd")) == 2
+        end
+
+        @testset "LineListNode — pjoin_dyn(LLN,LLN) 4-entry upgrade to DenseByteNode" begin
+            # a has 2 slots, b has 2 slots, all disjoint → 4 entries → DenseByteNode
+            a = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(a, UInt8[0x61], 1)
+            node_set_val!(a, UInt8[0x62], 2)
+            b = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(b, UInt8[0x63], 3)
+            node_set_val!(b, UInt8[0x64], 4)
+            r = pjoin_dyn(a, b)
+            @test r isa AlgResElement
+            joined = as_tagged(r.value)
+            @test node_tag(joined) == DENSE_BYTE_NODE_TAG
+            @test node_get_val(joined, UInt8[0x61]) == 1
+            @test node_get_val(joined, UInt8[0x62]) == 2
+            @test node_get_val(joined, UInt8[0x63]) == 3
+            @test node_get_val(joined, UInt8[0x64]) == 4
+        end
+
+        @testset "LineListNode — pjoin_dyn(LLN,LLN) one empty slot merges correctly" begin
+            # a has 1 slot, b has 1 slot, same key → Identity
+            a = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(a, collect(UInt8, "x"), 10)
+            b = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(b, collect(UInt8, "x"), 10)
+            r = pjoin_dyn(a, b)
+            @test r isa AlgResIdentity
+        end
+
+        @testset "LineListNode — pjoin_dyn(LLN, EmptyNode) → Identity(SELF)" begin
+            a = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
+            node_set_val!(a, collect(UInt8, "foo"), 42)
+            e = EmptyNode{Int, GlobalAlloc}()
+            r = pjoin_dyn(a, e)
+            @test r isa AlgResIdentity
+            @test r.mask & SELF_IDENT != 0
+        end
+
         # ================================================================
         # TinyRefNode tests
         # ================================================================
