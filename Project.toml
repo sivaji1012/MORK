@@ -1,0 +1,27 @@
+name = "MORK"
+uuid = "162375cb-4023-4ef9-895b-22c0041d5c13"
+version = "0.1.0"
+authors = ["PRIMUS Team"]
+
+# MORK — clean Julia port of trueagi-io/MORK
+# See docs/architecture/MORK_PACKAGE_PLAN.md for the phased implementation plan
+# and the committed design memories:
+#   - project_mork_package_architecture.md
+#   - project_mork_server_branch_reference.md
+#   - feedback_no_vector_metagraph_first.md
+#
+# Phase 0 scope: zero-dependency package skeleton. Only stdlib deps.
+# Runtime deps (HTTP.jl, JSON3, Dagger.jl, etc.) will be added per phase
+# as the corresponding modules land.
+
+[deps]
+SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
+
+[compat]
+julia = "1.12"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]

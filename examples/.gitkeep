@@ -1,0 +1,2 @@
+# User-level examples (e.g., multi_domain_demo.jl for Figure 4).
+# Library source never hardcodes domain names; examples may.
