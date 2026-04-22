@@ -643,6 +643,104 @@ function val_count(m::PathMap{V,A}) where {V,A}
 end
 
 # =====================================================================
+# PathMap lattice ops — ports trie_map.rs Lattice/DistributiveLattice/Quantale impls
+# =====================================================================
+
+# Helper: build a new PathMap from merged root_node and root_val results.
+# Ports the `|root_node, root_val| AlgebraicResult::Element(...)` closure used
+# by pjoin/pmeet/psubtract.
+function _pm_build(root_node_res, root_val_res,
+                   self_root, other_root,
+                   self_val, other_val,
+                   alloc::A) where {A<:Allocator}
+    alg_merge(root_node_res, root_val_res,
+        function(which)
+            which == 0 ? self_root : other_root
+        end,
+        function(which)
+            which == 0 ? self_val : other_val
+        end,
+        function(rn, rv)
+            # flatten: AlgResElement(x) → x, else nothing
+            flat_rn = rn isa TrieNodeODRc ? rn : nothing
+            flat_rv = rv  # already Union{Nothing,V}
+            AlgResElement(PathMap(flat_rn, flat_rv, alloc))
+        end)
+end
+
+"""
+    pjoin(a::PathMap{V,A}, b::PathMap{V,A}) → AlgebraicResult{PathMap{V,A}}
+
+Lattice join. Ports `Lattice::pjoin` for PathMap (trie_map.rs line 685).
+"""
+function pjoin(a::PathMap{V,A}, b::PathMap{V,A}) where {V,A}
+    node_res = pjoin(a.root, b.root)
+    val_res  = pjoin(a.root_val, b.root_val)
+    alg_merge(node_res, val_res,
+        which -> which == 0 ? a.root : b.root,
+        which -> which == 0 ? a.root_val : b.root_val,
+        (rn, rv) -> AlgResElement(PathMap{V,A}(rn, rv, a.alloc)))
+end
+
+"""
+    pmeet(a::PathMap{V,A}, b::PathMap{V,A}) → AlgebraicResult{PathMap{V,A}}
+
+Lattice meet. Ports `Lattice::pmeet` for PathMap (trie_map.rs line 725).
+"""
+function pmeet(a::PathMap{V,A}, b::PathMap{V,A}) where {V,A}
+    node_res = pmeet(a.root, b.root)
+    val_res  = pmeet(a.root_val, b.root_val)
+    alg_merge(node_res, val_res,
+        which -> which == 0 ? a.root : b.root,
+        which -> which == 0 ? a.root_val : b.root_val,
+        (rn, rv) -> AlgResElement(PathMap{V,A}(rn, rv, a.alloc)))
+end
+
+"""
+    psubtract(a::PathMap{V,A}, b::PathMap{V,A}) → AlgebraicResult{PathMap{V,A}}
+
+Lattice subtract. Ports `DistributiveLattice::psubtract` for PathMap (trie_map.rs line 747).
+"""
+function psubtract(a::PathMap{V,A}, b::PathMap{V,A}) where {V,A}
+    node_res = psubtract(a.root, b.root)
+    val_res  = psubtract(a.root_val, b.root_val)
+    alg_merge(node_res, val_res,
+        which -> which == 0 ? a.root : b.root,
+        which -> which == 0 ? a.root_val : b.root_val,
+        (rn, rv) -> AlgResElement(PathMap{V,A}(rn, rv, a.alloc)))
+end
+
+"""
+    prestrict(a::PathMap{V,A}, b::PathMap{V,A}) → AlgebraicResult{PathMap{V,A}}
+
+Quantale restrict. Ports `Quantale::prestrict` for PathMap (trie_map.rs line 769).
+If `b` has a root value, returns Identity(SELF_IDENT) — everything in `a` survives.
+Otherwise restricts `a`'s root node to the structure of `b`'s root node.
+"""
+function prestrict(a::PathMap{V,A}, b::PathMap{V,A}) where {V,A}
+    # If other has a root val, the entire self survives (Identity)
+    b.root_val !== nothing && return AlgResIdentity(SELF_IDENT)
+    a_root = a.root
+    b_root = b.root
+    if a_root === nothing || b_root === nothing
+        return AlgResNone()
+    end
+    r = prestrict_dyn(as_tagged(a_root), as_tagged(b_root))
+    if r isa AlgResElement
+        return AlgResElement(PathMap{V,A}(r.value, nothing, a.alloc))
+    elseif r isa AlgResIdentity
+        # mask must be SELF_IDENT per upstream debug_assert
+        if a.root_val !== nothing
+            return AlgResElement(PathMap{V,A}(a_root, nothing, a.alloc))
+        else
+            return AlgResIdentity(SELF_IDENT)
+        end
+    else
+        return AlgResNone()
+    end
+end
+
+# =====================================================================
 # Exports
 # =====================================================================
 
@@ -659,3 +757,4 @@ export zipper_ascend!, zipper_ascend_byte!
 export zipper_ascend_until!, zipper_ascend_until_branch!
 export zipper_to_next_val!
 export PathMap, _ensure_root!, read_zipper, read_zipper_at_path, get_val_at, path_exists_at, val_count
+export pjoin, pmeet, psubtract, prestrict

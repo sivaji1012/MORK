@@ -1967,6 +1967,94 @@ using MORK
         end
     end
 
+    @testset "PathMap lattice ops (ports trie_map.rs Lattice/DistributiveLattice/Quantale)" begin
+        alloc = GlobalAlloc()
+
+        @testset "pjoin: disjoint → Element with all keys" begin
+            a = PathMap{Int,GlobalAlloc}(alloc)
+            set_val_at!(a, UInt8[0x61], 1)
+            b = PathMap{Int,GlobalAlloc}(alloc)
+            set_val_at!(b, UInt8[0x62], 2)
+            r = pjoin(a, b)
+            @test r isa AlgResElement
+            @test get_val_at(r.value, UInt8[0x61]) == 1
+            @test get_val_at(r.value, UInt8[0x62]) == 2
+        end
+
+        @testset "pjoin: same map → Identity(SELF|COUNTER)" begin
+            a = PathMap{Int,GlobalAlloc}(alloc)
+            set_val_at!(a, UInt8[0x61], 1)
+            r = pjoin(a, a)
+            @test r isa AlgResIdentity
+            @test r.mask == (SELF_IDENT | COUNTER_IDENT)
+        end
+
+        @testset "pmeet: disjoint nodes, no root vals → Element(empty PathMap)" begin
+            # pmeet(a, b) where nodes are disjoint and both root_vals are nothing:
+            # node_res=None, val_res=Identity(SELF|COUNTER) → merge_f(nothing,nothing)
+            # → AlgResElement(empty PathMap). Upstream trie_map.rs:725 + ring.rs:216.
+            a = PathMap{Int,GlobalAlloc}(alloc)
+            set_val_at!(a, UInt8[0x61], 1)
+            b = PathMap{Int,GlobalAlloc}(alloc)
+            set_val_at!(b, UInt8[0x62], 2)
+            r = pmeet(a, b)
+            @test r isa AlgResElement
+            @test Base.isempty(r.value)
+        end
+
+        @testset "pmeet: same map → Identity(SELF|COUNTER)" begin
+            a = PathMap{Int,GlobalAlloc}(alloc)
+            set_val_at!(a, UInt8[0x61], 1)
+            r = pmeet(a, a)
+            @test r isa AlgResIdentity
+            @test r.mask == (SELF_IDENT | COUNTER_IDENT)
+        end
+
+        @testset "pmeet: overlapping keys → common key survives" begin
+            a = PathMap{Int,GlobalAlloc}(alloc)
+            set_val_at!(a, UInt8[0x61], 1)
+            set_val_at!(a, UInt8[0x62], 2)
+            b = PathMap{Int,GlobalAlloc}(alloc)
+            set_val_at!(b, UInt8[0x62], 2)
+            set_val_at!(b, UInt8[0x63], 3)
+            r = pmeet(a, b)
+            @test !(r isa AlgResNone)
+        end
+
+        @testset "psubtract: a - empty → Identity(SELF)" begin
+            a = PathMap{Int,GlobalAlloc}(alloc)
+            set_val_at!(a, UInt8[0x61], 1)
+            b = PathMap{Int,GlobalAlloc}(alloc)
+            r = psubtract(a, b)
+            @test r isa AlgResIdentity
+            @test (r.mask & SELF_IDENT) != 0
+        end
+
+        @testset "psubtract: a - a → None" begin
+            a = PathMap{Int,GlobalAlloc}(alloc)
+            set_val_at!(a, UInt8[0x61], 1)
+            r = psubtract(a, a)
+            @test r isa AlgResNone
+        end
+
+        @testset "prestrict: other has root_val → Identity(SELF)" begin
+            a = PathMap{Int,GlobalAlloc}(alloc)
+            set_val_at!(a, UInt8[0x61], 1)
+            b = PathMap{Int,GlobalAlloc}(nothing, 99, alloc)
+            r = prestrict(a, b)
+            @test r isa AlgResIdentity
+            @test (r.mask & SELF_IDENT) != 0
+        end
+
+        @testset "prestrict: b empty → None" begin
+            a = PathMap{Int,GlobalAlloc}(alloc)
+            set_val_at!(a, UInt8[0x61], 1)
+            b = PathMap{Int,GlobalAlloc}(alloc)
+            r = prestrict(a, b)
+            @test r isa AlgResNone
+        end
+    end
+
     @testset "WriteZipper and PathMap write API (ports pathmap/src/write_zipper.rs)" begin
         V = Int; A = GlobalAlloc; alloc = GlobalAlloc()
 

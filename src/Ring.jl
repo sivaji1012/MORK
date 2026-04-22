@@ -679,6 +679,74 @@ self type, used by the default `join_into!` impl. One impl per
 function convert_hetero end
 
 # =====================================================================
+# AlgebraicResult.merge — ports ring.rs AlgebraicResult::merge
+# =====================================================================
+#
+# Combines two independent AlgebraicResults into one, resolving Identity
+# by calling self_idents/b_idents to materialise the element when needed,
+# and calling merge_f(Option{V}, Option{BV}) -> AlgebraicResult{U} to
+# produce the combined element.
+#
+# self_idents(which::Int)  -> Union{Nothing, V}   (0 = trailing-zeros of mask)
+# b_idents(which::Int)     -> Union{Nothing, BV}
+# merge_f(a, b)            -> AlgebraicResult{U}
+"""
+    alg_merge(a, b, self_idents, b_idents, merge_f) → AlgebraicResult
+
+Ports `AlgebraicResult::merge` (ring.rs line 216).
+Combines two independent `AlgebraicResult` values by resolving Identity
+arms through `self_idents`/`b_idents` callbacks, then calling `merge_f`.
+"""
+function alg_merge(a, b, self_idents::F1, b_idents::F2, merge_f::F3) where {F1,F2,F3}
+    if a isa AlgResNone
+        if b isa AlgResNone
+            return AlgResNone()
+        elseif b isa AlgResElement
+            return merge_f(nothing, b.value)
+        else  # AlgResIdentity
+            si = self_idents(0)
+            if si === nothing
+                return AlgResIdentity(b.mask)
+            else
+                bv = b_idents(Int(trailing_zeros(b.mask)))
+                return merge_f(nothing, bv)
+            end
+        end
+    elseif a isa AlgResIdentity
+        if b isa AlgResNone
+            bi = b_idents(0)
+            if bi === nothing
+                return AlgResIdentity(a.mask)
+            else
+                sv = self_idents(Int(trailing_zeros(a.mask)))
+                return merge_f(sv, nothing)
+            end
+        elseif b isa AlgResElement
+            sv = self_idents(Int(trailing_zeros(a.mask)))
+            return merge_f(sv, b.value)
+        else  # both Identity
+            combined = a.mask & b.mask
+            if combined > 0
+                return AlgResIdentity(combined)
+            else
+                sv = self_idents(Int(trailing_zeros(a.mask)))
+                bv = b_idents(Int(trailing_zeros(b.mask)))
+                return merge_f(sv, bv)
+            end
+        end
+    else  # a isa AlgResElement
+        if b isa AlgResNone
+            return merge_f(a.value, nothing)
+        elseif b isa AlgResElement
+            return merge_f(a.value, b.value)
+        else  # b isa AlgResIdentity
+            bv = b_idents(Int(trailing_zeros(b.mask)))
+            return merge_f(a.value, bv)
+        end
+    end
+end
+
+# =====================================================================
 # Exports
 # =====================================================================
 
@@ -692,6 +760,7 @@ export AbstractQuantale
 export AbstractHeteroLattice, AbstractHeteroDistributiveLattice, AbstractHeteroQuantale
 export is_none, is_identity, is_element, identity_mask, invert_identity
 export map_into_option, into_option, unwrap_or_else
+export alg_merge
 export status, from_status, flatten, to_algebraic_result, merge_status
 export pjoin, pmeet, psubtract, prestrict, convert_hetero
 export join_into!, join_all
