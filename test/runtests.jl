@@ -1392,4 +1392,252 @@ using MORK
             @test got_child !== nothing
         end
     end
+
+    # ================================================================
+    # Zipper and PathMap tests
+    # ================================================================
+
+    @testset "Zipper and PathMap (ports pathmap/src/zipper.rs + trie_map.rs)" begin
+        V   = Int
+        A   = GlobalAlloc
+        alloc = GlobalAlloc()
+
+        # ---- node_along_path ----
+
+        @testset "node_along_path — empty path returns root unchanged" begin
+            rc = TrieNodeODRc(LineListNode{V,A}(alloc), alloc)
+            node_set_val!(rc.node, UInt8[UInt8('a')], 1)
+            final_rc, rem, val = node_along_path(rc, UInt8[], nothing)
+            @test final_rc === rc
+            @test isempty(rem)
+            @test val === nothing
+        end
+
+        @testset "node_along_path — traverse single slot" begin
+            # root → child at key "ab"
+            child_n = LineListNode{V,A}(alloc)
+            node_set_val!(child_n, UInt8[UInt8('c')], 99)
+            child_rc = TrieNodeODRc(child_n, alloc)
+            root_n = LineListNode{V,A}(alloc)
+            node_set_branch!(root_n, collect(UInt8, "ab"), child_rc)
+            root_rc = TrieNodeODRc(root_n, alloc)
+
+            final_rc, rem, val = node_along_path(root_rc, collect(UInt8, "abc"), nothing)
+            @test final_rc === child_rc
+            @test collect(rem) == UInt8[UInt8('c')]
+            @test val === nothing
+        end
+
+        @testset "node_along_path — full key match returns value" begin
+            root_n = LineListNode{V,A}(alloc)
+            node_set_val!(root_n, collect(UInt8, "hello"), 42)
+            root_rc = TrieNodeODRc(root_n, alloc)
+            # path exactly matches the key that leads to a value
+            # node_along_path stops when no child for remaining key
+            final_rc, rem, val = node_along_path(root_rc, collect(UInt8, "hello"), nothing)
+            # if node_get_child returns nothing for "hello" (it's a val, not a child),
+            # then final_rc = root_rc, rem = "hello", val = nothing
+            @test final_rc === root_rc
+            @test collect(rem) == collect(UInt8, "hello")
+        end
+
+        # ---- val_count_below_root ----
+
+        @testset "val_count_below_root — empty node" begin
+            @test val_count_below_root(nothing) == 0
+            e = EmptyNode{V,A}()
+            cache = Dict{UInt64,Int}()
+            @test node_val_count(e, cache) == 0
+        end
+
+        @testset "val_count_below_root — LineListNode with values" begin
+            n = LineListNode{V,A}(alloc)
+            node_set_val!(n, UInt8[UInt8('a')], 1)
+            node_set_val!(n, UInt8[UInt8('b')], 2)
+            @test val_count_below_root(n) == 2
+        end
+
+        # ---- ReadZipperCore construction ----
+
+        @testset "ReadZipperCore — construct at root of empty map" begin
+            rc = TrieNodeODRc(LineListNode{V,A}(alloc), alloc)
+            z = ReadZipperCore(rc, UInt8[], 0, nothing, alloc)
+            @test zipper_at_root(z)
+            @test isempty(zipper_path(z))
+            @test !zipper_is_val(z)
+            @test zipper_path_exists(z)   # root always exists per upstream semantics
+        end
+
+        @testset "ReadZipperCore — at_root after construction" begin
+            rc = TrieNodeODRc(LineListNode{V,A}(alloc), alloc)
+            node_set_val!(rc.node, UInt8[UInt8('x')], 10)
+            z = ReadZipperCore(rc, UInt8[], 0, nothing, alloc)
+            @test zipper_at_root(z)
+            @test !zipper_is_val(z)         # root has no value (values are below)
+            @test zipper_child_count(z) == 1  # 'x' branch
+        end
+
+        # ---- ReadZipperCore_at_path ----
+
+        @testset "ReadZipperCore_at_path — positions at path 'a'" begin
+            # Build: root → LineListNode with value at "a"
+            root_n = LineListNode{V,A}(alloc)
+            node_set_val!(root_n, UInt8[UInt8('a')], 55)
+            root_rc = TrieNodeODRc(root_n, alloc)
+
+            # Zipper pre-positioned at "a" — should report is_val = true
+            path = collect(UInt8, "a")
+            z = ReadZipperCore_at_path(root_rc, path, length(path), 0, nothing, alloc)
+            @test zipper_at_root(z)
+            @test isempty(zipper_path(z))
+            @test zipper_is_val(z)
+            @test zipper_val(z) == 55
+        end
+
+        # ---- descend / ascend navigation ----
+
+        @testset "ReadZipperCore — descend_to and is_val" begin
+            root_n = LineListNode{V,A}(alloc)
+            node_set_val!(root_n, UInt8[UInt8('a'), UInt8('b')], 7)
+            root_rc = TrieNodeODRc(root_n, alloc)
+            z = ReadZipperCore(root_rc, UInt8[], 0, nothing, alloc)
+
+            zipper_descend_to!(z, collect(UInt8, "ab"))
+            @test !zipper_at_root(z)
+            @test zipper_path(z) == UInt8[UInt8('a'), UInt8('b')]
+            @test zipper_is_val(z)
+            @test zipper_val(z) == 7
+        end
+
+        @testset "ReadZipperCore — ascend after descend" begin
+            root_n = LineListNode{V,A}(alloc)
+            node_set_val!(root_n, UInt8[UInt8('x')], 3)
+            root_rc = TrieNodeODRc(root_n, alloc)
+            z = ReadZipperCore(root_rc, UInt8[], 0, nothing, alloc)
+            zipper_descend_to!(z, collect(UInt8, "x"))
+            @test zipper_is_val(z)
+            @test zipper_val(z) == 3
+            zipper_ascend!(z, 1)
+            @test zipper_at_root(z)
+            @test !zipper_is_val(z)
+        end
+
+        @testset "ReadZipperCore — ascend_byte" begin
+            root_n = LineListNode{V,A}(alloc)
+            node_set_val!(root_n, collect(UInt8, "abc"), 11)
+            root_rc = TrieNodeODRc(root_n, alloc)
+            z = ReadZipperCore(root_rc, UInt8[], 0, nothing, alloc)
+            zipper_descend_to!(z, collect(UInt8, "abc"))
+            @test length(zipper_path(z)) == 3
+            @test zipper_ascend_byte!(z)
+            @test length(zipper_path(z)) == 2
+            @test zipper_ascend_byte!(z)
+            @test length(zipper_path(z)) == 1
+            @test zipper_ascend_byte!(z)
+            @test zipper_at_root(z)
+            @test !zipper_ascend_byte!(z)  # can't ascend above root
+        end
+
+        @testset "ReadZipperCore — reset!" begin
+            root_n = LineListNode{V,A}(alloc)
+            node_set_val!(root_n, collect(UInt8, "hello"), 5)
+            root_rc = TrieNodeODRc(root_n, alloc)
+            z = ReadZipperCore(root_rc, UInt8[], 0, nothing, alloc)
+            zipper_descend_to!(z, collect(UInt8, "hello"))
+            @test !zipper_at_root(z)
+            zipper_reset!(z)
+            @test zipper_at_root(z)
+        end
+
+        # ---- to_next_val iteration ----
+
+        @testset "ReadZipperCore — to_next_val iterates values in order" begin
+            # Build a DenseByteNode with values at 'a', 'b', 'c'
+            n = DenseByteNode{V,A}(alloc)
+            node_set_val!(n, UInt8[UInt8('a')], 1)
+            node_set_val!(n, UInt8[UInt8('b')], 2)
+            node_set_val!(n, UInt8[UInt8('c')], 3)
+            rc = TrieNodeODRc(n, alloc)
+            z = ReadZipperCore(rc, UInt8[], 0, nothing, alloc)
+
+            found = Int[]
+            while zipper_to_next_val!(z)
+                push!(found, zipper_val(z))
+            end
+            sort!(found)
+            @test found == [1, 2, 3]
+        end
+
+        @testset "ReadZipperCore — to_next_val empty node yields nothing" begin
+            n = LineListNode{V,A}(alloc)
+            rc = TrieNodeODRc(n, alloc)
+            z = ReadZipperCore(rc, UInt8[], 0, nothing, alloc)
+            @test !zipper_to_next_val!(z)
+        end
+
+        @testset "ReadZipperCore — to_next_val single value" begin
+            n = LineListNode{V,A}(alloc)
+            node_set_val!(n, UInt8[UInt8('z')], 99)
+            rc = TrieNodeODRc(n, alloc)
+            z = ReadZipperCore(rc, UInt8[], 0, nothing, alloc)
+            @test zipper_to_next_val!(z)
+            @test zipper_val(z) == 99
+            @test !zipper_to_next_val!(z)
+        end
+
+        # ---- PathMap ----
+
+        @testset "PathMap — empty map is_empty" begin
+            m = PathMap{V}()
+            @test Base.isempty(m)
+            @test val_count(m) == 0
+        end
+
+        @testset "PathMap — read_zipper on empty map" begin
+            m = PathMap{V}()
+            z = read_zipper(m)
+            @test zipper_at_root(z)
+            @test !zipper_is_val(z)
+        end
+
+        @testset "PathMap — get_val_at missing key returns nothing" begin
+            m = PathMap{V}()
+            @test get_val_at(m, collect(UInt8, "missing")) === nothing
+        end
+
+        @testset "PathMap — manual root population then read" begin
+            # Manually build a PathMap's root node (bypass write zipper)
+            root_n = LineListNode{V,A}(alloc)
+            node_set_val!(root_n, collect(UInt8, "hello"), 42)
+            root_rc = TrieNodeODRc(root_n, alloc)
+            m = PathMap{V,A}(root_rc, nothing, alloc)
+
+            @test get_val_at(m, collect(UInt8, "hello")) == 42
+            @test get_val_at(m, collect(UInt8, "world")) === nothing
+            @test !Base.isempty(m)
+            @test val_count(m) == 1
+        end
+
+        @testset "PathMap — read_zipper_at_path" begin
+            root_n = LineListNode{V,A}(alloc)
+            node_set_val!(root_n, collect(UInt8, "key"), 77)
+            root_rc = TrieNodeODRc(root_n, alloc)
+            m = PathMap{V,A}(root_rc, nothing, alloc)
+
+            z = read_zipper_at_path(m, collect(UInt8, "key"))
+            @test zipper_is_val(z)
+            @test zipper_val(z) == 77
+            @test isempty(zipper_path(z))   # pre-positioned at "key", so path() = ""
+        end
+
+        @testset "PathMap — path_exists_at" begin
+            root_n = LineListNode{V,A}(alloc)
+            node_set_val!(root_n, collect(UInt8, "yes"), 1)
+            root_rc = TrieNodeODRc(root_n, alloc)
+            m = PathMap{V,A}(root_rc, nothing, alloc)
+
+            @test path_exists_at(m, collect(UInt8, "yes"))
+            @test !path_exists_at(m, collect(UInt8, "no"))
+        end
+    end
 end

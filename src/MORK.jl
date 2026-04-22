@@ -57,6 +57,10 @@ include("nodes/TinyRefNode.jl")
 # Ports pathmap/src/dense_byte_node.rs.
 include("nodes/DenseByteNode.jl")
 
+# Read zipper (cursor) + PathMap container.
+# Ports pathmap/src/zipper.rs (read-only surface) + pathmap/src/trie_map.rs.
+include("Zipper.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """
