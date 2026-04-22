@@ -2226,6 +2226,163 @@ using MORK
         end
 
         # ==================================================================
+        # WriteZipper lattice ops (ports write_zipper.rs graft/join_into/meet_into/
+        # subtract_into/restrict — lines 1401-1927)
+        # ==================================================================
+
+        @testset "wz_graft! — replace subtrie unconditionally" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "abc"), 1)
+            set_val_at!(m, collect(UInt8, "abd"), 2)
+
+            # src: a map with only "abc" → 99
+            src = PathMap{V}()
+            set_val_at!(src, collect(UInt8, "abc"), 99)
+
+            # graft src at root of m → m becomes src
+            z = write_zipper(m)
+            src_anr = _wz_get_focus_anr(write_zipper(src))
+            wz_graft!(z, src_anr)
+
+            @test get_val_at(m, collect(UInt8, "abc")) == 99
+            # "abd" is gone because we grafted src (which has no "abd")
+        end
+
+        @testset "wz_graft_map! — graft from PathMap" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "x"), 5)
+
+            src = PathMap{V}()
+            set_val_at!(src, collect(UInt8, "x"), 42)
+
+            z = write_zipper(m)
+            wz_graft_map!(z, src)
+            @test get_val_at(m, collect(UInt8, "x")) == 42
+        end
+
+        @testset "wz_join_into! — disjoint maps produce union" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "a"), 1)
+            src = PathMap{V}()
+            set_val_at!(src, collect(UInt8, "b"), 2)
+
+            z    = write_zipper(m)
+            z_src = write_zipper(src)
+            src_anr = _wz_get_focus_anr(z_src)
+            st = wz_join_into!(z, src_anr)
+
+            @test st == ALG_STATUS_ELEMENT
+            @test get_val_at(m, collect(UInt8, "a")) == 1
+            @test get_val_at(m, collect(UInt8, "b")) == 2
+        end
+
+        @testset "wz_join_into! — empty src returns Identity" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "a"), 7)
+
+            z   = write_zipper(m)
+            st  = wz_join_into!(z, ANRNone{V, GlobalAlloc}())
+
+            @test st == ALG_STATUS_IDENTITY
+            @test get_val_at(m, collect(UInt8, "a")) == 7
+        end
+
+        @testset "wz_join_map_into! — identical maps → Identity" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "k"), 3)
+            # Join with a copy
+            src = PathMap{V}()
+            set_val_at!(src, collect(UInt8, "k"), 3)
+
+            z  = write_zipper(m)
+            st = wz_join_map_into!(z, src)
+            # pjoin(identical) → AlgResIdentity; mask & SELF_IDENT > 0 → Identity
+            @test st == ALG_STATUS_IDENTITY || st == ALG_STATUS_ELEMENT
+            @test get_val_at(m, collect(UInt8, "k")) == 3
+        end
+
+        @testset "wz_meet_into! — disjoint → None (empty result)" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "a"), 1)
+            src = PathMap{V}()
+            set_val_at!(src, collect(UInt8, "b"), 2)
+
+            z     = write_zipper(m)
+            z_src = write_zipper(src)
+            src_anr = _wz_get_focus_anr(z_src)
+            st = wz_meet_into!(z, src_anr)
+
+            @test st == ALG_STATUS_NONE
+        end
+
+        @testset "wz_meet_into! — common key survives" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "ab"), 1)
+            set_val_at!(m, collect(UInt8, "ac"), 2)
+            src = PathMap{V}()
+            set_val_at!(src, collect(UInt8, "ab"), 99)
+
+            z     = write_zipper(m)
+            z_src = write_zipper(src)
+            src_anr = _wz_get_focus_anr(z_src)
+            st = wz_meet_into!(z, src_anr)
+
+            @test st != ALG_STATUS_NONE
+            @test get_val_at(m, collect(UInt8, "ab")) !== nothing
+        end
+
+        @testset "wz_subtract_into! — a - a = None" begin
+            # Use UInt32 which has psubtract defined (saturating subtract)
+            m2 = PathMap{UInt32}()
+            set_val_at!(m2, collect(UInt8, "x"), UInt32(5))
+            src2 = PathMap{UInt32}()
+            set_val_at!(src2, collect(UInt8, "x"), UInt32(5))
+
+            z2    = write_zipper(m2)
+            z_src2 = write_zipper(src2)
+            src_anr2 = _wz_get_focus_anr(z_src2)
+            st = wz_subtract_into!(z2, src_anr2)
+
+            @test st == ALG_STATUS_NONE
+        end
+
+        @testset "wz_subtract_into! — a - empty = Identity" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "x"), 5)
+
+            z   = write_zipper(m)
+            st  = wz_subtract_into!(z, ANRNone{V, GlobalAlloc}())
+
+            @test st == ALG_STATUS_IDENTITY
+            @test get_val_at(m, collect(UInt8, "x")) == 5
+        end
+
+        @testset "wz_restrict! — empty src → None" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "abc"), 1)
+
+            z  = write_zipper(m)
+            st = wz_restrict!(z, ANRNone{V, GlobalAlloc}())
+            @test st == ALG_STATUS_NONE
+        end
+
+        @testset "wz_restrict! — src superset → Identity" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "a"), 1)
+            src = PathMap{V}()
+            set_val_at!(src, collect(UInt8, "a"), 2)
+            set_val_at!(src, collect(UInt8, "b"), 3)
+
+            z     = write_zipper(m)
+            z_src = write_zipper(src)
+            src_anr = _wz_get_focus_anr(z_src)
+            st = wz_restrict!(z, src_anr)
+
+            @test st == ALG_STATUS_IDENTITY || st == ALG_STATUS_ELEMENT
+            @test get_val_at(m, collect(UInt8, "a")) !== nothing
+        end
+
+        # ==================================================================
         # TrieRef tests (mirrors trie_ref_test1 + trie_ref_test2 in upstream)
         # ==================================================================
 

@@ -463,7 +463,9 @@ function psubtract(a::Union{Nothing, V}, b::Union{Nothing, V})::AlgebraicResult{
         return AlgResIdentity(SELF_IDENT)
     else
         b === nothing && return AlgResIdentity(SELF_IDENT)
-        r = psubtract(a, b)
+        # Rebind to V to avoid recursing back into this Union{Nothing,V} overload
+        av::V = a; bv::V = b
+        r = psubtract(av, bv)
         if is_none(r)
             return AlgResElement{Union{Nothing, V}}(nothing)
         elseif is_element(r)

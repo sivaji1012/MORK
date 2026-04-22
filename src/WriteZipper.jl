@@ -411,6 +411,289 @@ function remove_val_at!(m::PathMap{V,A}, path, prune::Bool=false) where {V,A}
 end
 
 # =====================================================================
+# _wz_get_focus_anr — get AbstractNodeRef at cursor position
+# =====================================================================
+#
+# Mirrors WriteZipperCore::get_focus (write_zipper.rs:1231).
+# Non-root: delegate to get_node_at_key on the focus node.
+# At root: wrap the root TrieNodeODRc as ANRBorrowedRc.
+
+function _wz_get_focus_anr(z::WriteZipperCore{V,A}) where {V,A}
+    nk = collect(_wz_node_key(z))
+    if isempty(nk)
+        ANRBorrowedRc{V,A}(z.focus_stack[1])
+    else
+        get_node_at_key(z.focus_stack[end].node, nk)
+    end
+end
+
+# =====================================================================
+# _wz_remove_branches! — remove all branches at cursor
+# =====================================================================
+#
+# Mirrors WriteZipperCore::remove_branches (write_zipper.rs:1948).
+# prune=true path (prune_path_internal) is deferred — passing false is safe.
+
+function _wz_remove_branches!(z::WriteZipperCore{V,A}, prune::Bool) where {V,A}
+    nk = collect(_wz_node_key(z))
+    if !isempty(nk)
+        focus_node = z.focus_stack[end].node
+        removed = node_remove_all_branches!(focus_node, nk, prune)
+        removed
+    else
+        @assert length(z.focus_stack) == 1
+        if node_is_empty(z.focus_stack[1].node)
+            return false
+        end
+        empty_rc = TrieNodeODRc(LineListNode{V,A}(z.alloc), z.alloc)
+        z.pathmap.root = empty_rc
+        z.focus_stack[1] = empty_rc
+        true
+    end
+end
+
+# =====================================================================
+# _wz_graft_internal! — plant src at cursor (core of all lattice ops)
+# =====================================================================
+#
+# Mirrors WriteZipperCore::graft_internal (write_zipper.rs:2101).
+# src === nothing → _wz_remove_branches!
+# at root (node_key empty) → direct stack/pathmap root replacement
+# otherwise → node_set_branch! via _wz_in_mut_static_result!
+
+function _wz_graft_internal!(z::WriteZipperCore{V,A},
+                              src::Union{Nothing,TrieNodeODRc{V,A}}) where {V,A}
+    if src !== nothing
+        nk = collect(_wz_node_key(z))
+        if !isempty(nk)
+            sub_branch_added = _wz_in_mut_static_result!(z,
+                (node, key) -> node_set_branch!(node, key, src),
+                (_, _)      -> true)
+            if sub_branch_added
+                _wz_mend_root!(z)
+                _wz_descend_to_internal!(z)
+            end
+        else
+            z.pathmap.root   = src
+            z.focus_stack[1] = src
+        end
+    else
+        _wz_remove_branches!(z, false)
+    end
+end
+
+# =====================================================================
+# wz_graft! / wz_graft_map! — unconditional subtrie replacement
+# =====================================================================
+#
+# Mirrors WriteZipperCore::graft / graft_map (write_zipper.rs:1401/1411).
+# graft_root_vals feature not enabled — root val handling omitted.
+
+"""
+    wz_graft!(z, src_anr)
+
+Replace the subtrie at the cursor with `src_anr`'s subtrie.
+"""
+function wz_graft!(z::WriteZipperCore{V,A}, src_anr::AbstractNodeRef{V,A}) where {V,A}
+    _wz_graft_internal!(z, into_option(src_anr))
+end
+
+"""
+    wz_graft_map!(z, map)
+
+Replace the subtrie at the cursor with `map`'s root node.
+"""
+function wz_graft_map!(z::WriteZipperCore{V,A}, map::PathMap{V,A}) where {V,A}
+    _wz_graft_internal!(z, map.root)
+end
+
+# =====================================================================
+# wz_join_into! — pjoin self with src, result stored in self
+# =====================================================================
+#
+# Mirrors WriteZipperCore::join_into (write_zipper.rs:1499).
+# Returns AlgebraicStatus.
+
+"""
+    wz_join_into!(z, src_anr) -> AlgebraicStatus
+
+Join (lattice-sup) self's subtrie with `src_anr`. Result written to self.
+"""
+function wz_join_into!(z::WriteZipperCore{V,A}, src_anr::AbstractNodeRef{V,A}) where {V,A}
+    if is_none(src_anr) || node_is_empty(as_tagged(src_anr))
+        focus_anr = _wz_get_focus_anr(z)
+        return (is_none(focus_anr) || node_is_empty(as_tagged(focus_anr))) ?
+               ALG_STATUS_NONE : ALG_STATUS_IDENTITY
+    end
+    focus_anr = _wz_get_focus_anr(z)
+    if is_none(focus_anr)
+        _wz_graft_internal!(z, into_option(src_anr))
+        return ALG_STATUS_ELEMENT
+    end
+    self_node = as_tagged(focus_anr)
+    if node_is_empty(self_node)
+        _wz_graft_internal!(z, into_option(src_anr))
+        return ALG_STATUS_ELEMENT
+    end
+    result = pjoin_dyn(self_node, as_tagged(src_anr))
+    if result isa AlgResElement
+        _wz_graft_internal!(z, result.value)
+        ALG_STATUS_ELEMENT
+    elseif result isa AlgResIdentity
+        result.mask & SELF_IDENT > 0 ? ALG_STATUS_IDENTITY :
+            (_wz_graft_internal!(z, into_option(src_anr)); ALG_STATUS_ELEMENT)
+    else
+        _wz_graft_internal!(z, nothing)
+        ALG_STATUS_NONE
+    end
+end
+
+# =====================================================================
+# wz_join_map_into! — pjoin self with PathMap, result stored in self
+# =====================================================================
+#
+# Mirrors WriteZipperCore::join_map_into (write_zipper.rs:1535).
+
+"""
+    wz_join_map_into!(z, map) -> AlgebraicStatus
+
+Join self's subtrie with `map`. Result written to self.
+"""
+function wz_join_map_into!(z::WriteZipperCore{V,A}, map::PathMap{V,A}) where {V,A}
+    src_rc = map.root
+    if src_rc === nothing
+        focus_anr = _wz_get_focus_anr(z)
+        return (is_none(focus_anr) || node_is_empty(as_tagged(focus_anr))) ?
+               ALG_STATUS_NONE : ALG_STATUS_IDENTITY
+    end
+    focus_anr = _wz_get_focus_anr(z)
+    if is_none(focus_anr)
+        _wz_graft_internal!(z, src_rc)
+        return ALG_STATUS_ELEMENT
+    end
+    self_node = as_tagged(focus_anr)
+    if node_is_empty(self_node)
+        _wz_graft_internal!(z, src_rc)
+        return ALG_STATUS_ELEMENT
+    end
+    result = pjoin_dyn(self_node, src_rc.node)
+    if result isa AlgResElement
+        _wz_graft_internal!(z, result.value)
+        ALG_STATUS_ELEMENT
+    elseif result isa AlgResIdentity
+        result.mask & SELF_IDENT > 0 ? ALG_STATUS_IDENTITY :
+            (_wz_graft_internal!(z, src_rc); ALG_STATUS_ELEMENT)
+    else
+        _wz_graft_internal!(z, nothing)
+        ALG_STATUS_NONE
+    end
+end
+
+# =====================================================================
+# wz_meet_into! — pmeet self with src, result stored in self
+# =====================================================================
+#
+# Mirrors WriteZipperCore::meet_into (write_zipper.rs:1718).
+
+"""
+    wz_meet_into!(z, src_anr, prune=false) -> AlgebraicStatus
+
+Meet (lattice-inf) self's subtrie with `src_anr`. Result written to self.
+`prune=true` removes empty dangling ancestor paths (not yet implemented).
+"""
+function wz_meet_into!(z::WriteZipperCore{V,A}, src_anr::AbstractNodeRef{V,A},
+                       prune::Bool=false) where {V,A}
+    focus_anr = _wz_get_focus_anr(z)
+    if is_none(focus_anr) || node_is_empty(as_tagged(focus_anr))
+        return ALG_STATUS_NONE
+    end
+    if is_none(src_anr)
+        _wz_graft_internal!(z, nothing)
+        return ALG_STATUS_NONE
+    end
+    self_node = as_tagged(focus_anr)
+    result = pmeet_dyn(self_node, as_tagged(src_anr))
+    if result isa AlgResElement
+        _wz_graft_internal!(z, result.value)
+        ALG_STATUS_ELEMENT
+    elseif result isa AlgResIdentity
+        result.mask & SELF_IDENT > 0 ? ALG_STATUS_IDENTITY :
+            (_wz_graft_internal!(z, into_option(src_anr)); ALG_STATUS_ELEMENT)
+    else
+        _wz_graft_internal!(z, nothing)
+        ALG_STATUS_NONE
+    end
+end
+
+# =====================================================================
+# wz_subtract_into! — psubtract src from self, result stored in self
+# =====================================================================
+#
+# Mirrors WriteZipperCore::subtract_into (write_zipper.rs:1829).
+
+"""
+    wz_subtract_into!(z, src_anr, prune=false) -> AlgebraicStatus
+
+Subtract `src_anr` from self's subtrie. Result written to self.
+`prune=true` removes empty dangling paths (not yet implemented).
+"""
+function wz_subtract_into!(z::WriteZipperCore{V,A}, src_anr::AbstractNodeRef{V,A},
+                            prune::Bool=false) where {V,A}
+    focus_anr = _wz_get_focus_anr(z)
+    self_empty = is_none(focus_anr) || node_is_empty(as_tagged(focus_anr))
+    if is_none(src_anr)
+        return self_empty ? ALG_STATUS_NONE : ALG_STATUS_IDENTITY
+    end
+    if self_empty
+        return ALG_STATUS_NONE
+    end
+    self_node = as_tagged(focus_anr)
+    result = psubtract_dyn(self_node, as_tagged(src_anr))
+    if result isa AlgResElement
+        _wz_graft_internal!(z, result.value)
+        ALG_STATUS_ELEMENT
+    elseif result isa AlgResIdentity
+        ALG_STATUS_IDENTITY   # subtract is non-commutative → only SELF_IDENT possible
+    else
+        _wz_graft_internal!(z, nothing)
+        ALG_STATUS_NONE
+    end
+end
+
+# =====================================================================
+# wz_restrict! — prestrict self to src's domain
+# =====================================================================
+#
+# Mirrors WriteZipperCore::restrict (write_zipper.rs:1900).
+
+"""
+    wz_restrict!(z, src_anr) -> AlgebraicStatus
+
+Restrict self's subtrie to paths present in `src_anr`.
+"""
+function wz_restrict!(z::WriteZipperCore{V,A}, src_anr::AbstractNodeRef{V,A}) where {V,A}
+    if is_none(src_anr)
+        _wz_graft_internal!(z, nothing)
+        return ALG_STATUS_NONE
+    end
+    focus_anr = _wz_get_focus_anr(z)
+    if is_none(focus_anr)
+        return ALG_STATUS_NONE
+    end
+    self_node = as_tagged(focus_anr)
+    result = prestrict_dyn(self_node, as_tagged(src_anr))
+    if result isa AlgResElement
+        _wz_graft_internal!(z, result.value)
+        ALG_STATUS_ELEMENT
+    elseif result isa AlgResIdentity
+        ALG_STATUS_IDENTITY   # restrict is non-commutative → only SELF_IDENT possible
+    else
+        _wz_graft_internal!(z, nothing)
+        ALG_STATUS_NONE
+    end
+end
+
+# =====================================================================
 # Exports
 # =====================================================================
 
@@ -421,3 +704,7 @@ export wz_descend_to!, wz_ascend!
 export wz_path_exists, wz_is_val, wz_get_val, wz_path
 export write_zipper, write_zipper_at_path
 export set_val_at!, remove_val_at!
+export _wz_get_focus_anr, _wz_graft_internal!, _wz_remove_branches!
+export wz_graft!, wz_graft_map!
+export wz_join_into!, wz_join_map_into!
+export wz_meet_into!, wz_subtract_into!, wz_restrict!
