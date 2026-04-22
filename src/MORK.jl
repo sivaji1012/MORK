@@ -35,6 +35,11 @@ include("utils/Utils.jl")
 # until PathMap lands (see Ints.jl header). Ports pathmap/src/utils/ints.rs.
 include("utils/Ints.jl")
 
+# TrieNode abstract interface, TrieNodeODRc, PayloadRef, ValOrChild,
+# AbstractNodeRef. Ports pathmap/src/trie_node.rs (interface layer).
+# Concrete node types land in nodes/*.jl (Phase 1b).
+include("nodes/TrieNode.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """

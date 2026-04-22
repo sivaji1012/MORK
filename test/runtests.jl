@@ -637,5 +637,64 @@ using MORK
                 @test decoded == orig
             end
         end
+
+        @testset "TrieNode — constants" begin
+            # Port of trie_node.rs: MAX_NODE_KEY_BYTES / NODE_ITER_INVALID / NODE_ITER_FINISHED
+            @test MAX_NODE_KEY_BYTES == 48
+            @test NODE_ITER_INVALID  == typemax(UInt128)
+            @test NODE_ITER_FINISHED == typemax(UInt128) - UInt128(1)
+            @test NODE_ITER_INVALID  > NODE_ITER_FINISHED
+
+            # Node tag constants match upstream
+            @test EMPTY_NODE_TAG      == 0
+            @test DENSE_BYTE_NODE_TAG == 1
+            @test LINE_LIST_NODE_TAG  == 2
+            @test CELL_BYTE_NODE_TAG  == 3
+            @test TINY_REF_NODE_TAG   == 4
+            # All distinct
+            @test length(Set([EMPTY_NODE_TAG, DENSE_BYTE_NODE_TAG, LINE_LIST_NODE_TAG,
+                              CELL_BYTE_NODE_TAG, TINY_REF_NODE_TAG])) == 5
+        end
+
+        @testset "TrieNode — TrieNodeODRc empty sentinel" begin
+            rc = TrieNodeODRc{Int, GlobalAlloc}()
+            @test is_empty_node(rc)
+            @test refcount(rc) == 1
+            @test shared_node_id(rc) == UInt64(0)
+        end
+
+        @testset "TrieNode — PayloadRef None" begin
+            p = PayloadRef{Int, GlobalAlloc}()
+            @test is_none(p)
+            @test !is_val(p)
+            @test !is_child(p)
+        end
+
+        @testset "TrieNode — ValOrChild" begin
+            v = ValOrChild(42)
+            @test is_val(v)
+            @test !is_child(v)
+            @test into_val(v) == 42
+
+            rc = TrieNodeODRc{Int, GlobalAlloc}()
+            c = ValOrChild(rc)
+            @test is_child(c)
+            @test !is_val(c)
+        end
+
+        @testset "TrieNode — AbstractNodeRef None + variants" begin
+            n = ANRNone{Int, GlobalAlloc}()
+            @test is_none(n)
+            @test into_option(n) === nothing
+
+            rc = TrieNodeODRc{Int, GlobalAlloc}()
+            brw = ANRBorrowedRc{Int, GlobalAlloc}(rc)
+            @test !is_none(brw)
+            @test borrow(brw) === rc
+
+            owned = ANROwnedRc{Int, GlobalAlloc}(rc)
+            @test !is_none(owned)
+            @test borrow(owned) === rc
+        end
     end
 end
