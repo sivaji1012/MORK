@@ -332,19 +332,28 @@ function _space_query_multi_inner!(btm::PathMap{UnitVal},
         while pz_to_next_val!(prz)
             pz_focus_factor(prz) != pz_factor_count(prz) - 1 && continue
 
-            full_path      = collect(pz_path(prz))
-            factor_indices = prz.factor_paths
+            # The ProductZipper encodes ALL factor paths in ONE combined path
+            # via pz.z (the primary zipper). factor_paths[i] marks the byte
+            # boundary where factor i ends / factor i+1 begins.
+            #
+            # For k sources: factor_paths has k-1 entries.
+            #   source 1 expression: combined[1 : factor_paths[1]]
+            #   source i expression: combined[factor_paths[i-1]+1 : factor_paths[i]]
+            #   last source:         combined[factor_paths[end]+1 : end]
+            # For single source: factor_paths is empty, use full path.
+            combined   = collect(pz_path(prz))
+            fps        = prz.factor_paths   # path-length boundaries, 1-based
 
-            # Build pairs into scratch Vector (reuse allocation)
             empty!(pairs_scratch)
-            push!(pairs_scratch,
-                  (sources[1],
-                   ExprEnv(UInt8(1), UInt8(0), UInt32(0), MORK.Expr(full_path))))
-            for (src_i, other_idx) in zip(sources[2:end], factor_indices)
-                sub_expr = MORK.Expr(full_path[other_idx+1:end])
+            # Slice the combined path for each source
+            boundaries = vcat(0, fps, length(combined))
+            for (k, src) in enumerate(sources)
+                lo   = boundaries[k] + 1
+                hi   = boundaries[k + 1]
+                (lo > hi || lo > length(combined)) && break
+                expr = MORK.Expr(combined[lo:hi])
                 push!(pairs_scratch,
-                      (src_i,
-                       ExprEnv(UInt8(length(pairs_scratch)+1), UInt8(0), UInt32(0), sub_expr)))
+                      (src, ExprEnv(UInt8(k), UInt8(0), UInt32(0), expr)))
             end
 
             # Unify into scratch Dict (zero alloc on failure)
@@ -355,7 +364,7 @@ function _space_query_multi_inner!(btm::PathMap{UnitVal},
                 # This preserves the public contract: effect may retain bindings.
                 bindings_out = copy(bindings_scratch)
                 empty!(bindings_scratch)
-                if !effect(bindings_out, MORK.Expr(full_path))
+                if !effect(bindings_out, MORK.Expr(combined))
                     throw(BreakQuery())
                 end
             else

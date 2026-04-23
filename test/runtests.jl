@@ -3769,4 +3769,64 @@ using MORK
             @test (SPACE_SIZES[4] & UInt64(2)) != 0
         end
     end
+
+    # =========================================================================
+    # metta_calculus integration tests (ports main.rs test functions)
+    # =========================================================================
+
+    @testset "metta_calculus integration (ports main.rs)" begin
+
+        function _mc(src::String, steps::Int=1_000_000)
+            s = new_space()
+            space_add_all_sexpr!(s, src)
+            space_metta_calculus!(s, steps)
+            space_dump_all_sexpr(s)
+        end
+
+        @testset "lookup — exact ground pattern" begin
+            result = _mc("(exec 0 (, (Something (very specific))) (, MATCHED))\n(Something (very specific))\n")
+            @test occursin("MATCHED", result)
+        end
+
+        @testset "positive — variable pattern matches ground fact" begin
+            result = _mc("(exec 0 (, (Something \$unspecific)) (, MATCHED))\n(Something (very specific))\n")
+            @test occursin("MATCHED", result)
+        end
+
+        @testset "positive_equal — repeated variable constraint" begin
+            result = _mc("(exec 0 (, (Something \$rep \$rep)) (, MATCHED))\n(Something (very specific) (very specific))\n")
+            @test occursin("MATCHED", result)
+        end
+
+        @testset "negative — ground pattern, variable fact" begin
+            result = _mc("(exec 0 (, (Something (very specific))) (, MATCHED))\n(Something \$unspecific)\n")
+            @test occursin("MATCHED", result)
+        end
+
+        @testset "negative_equal — ground repeated, variable fact" begin
+            result = _mc("(exec 0 (, (Something (very specific) (very specific))) (, MATCHED))\n(Something \$rep \$rep)\n")
+            @test occursin("MATCHED", result)
+        end
+
+        @testset "bipolar — partial variable both sides" begin
+            result = _mc("(exec 0 (, (Something (very \$u))) (, MATCHED))\n(Something (\$u specific))\n")
+            @test occursin("MATCHED", result)
+        end
+
+        @testset "two_positive_equal — two-source join, repeated vars" begin
+            result = _mc("(exec 0 (, (Something \$x \$x) (Else \$y \$y)) (, MATCHED))\n(Something (foo bar) (foo bar))\n(Else (bar baz) (bar baz))\n")
+            @test occursin("MATCHED", result)
+        end
+
+        @testset "two_positive_equal_crossed — shared vars across sources" begin
+            result = _mc("(exec 0 (, (Something \$x \$y) (Else \$x \$y)) (, MATCHED))\n(Something (foo bar) (bar baz))\n(Else (foo bar) (bar baz))\n")
+            @test occursin("MATCHED", result)
+        end
+
+        @testset "top_level_match — ground-to-ground rule" begin
+            result = _mc("(exec 0 (, foo) (, bar))\nfoo\n")
+            @test occursin("bar", result)
+        end
+
+    end   # metta_calculus integration
 end
