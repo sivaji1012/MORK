@@ -10,7 +10,7 @@ algebra, morphisms, arena compact, serialization) + mork_expr (encoding,
 traversal, unification, apply) + mork_interning + mork_frontend (sexpr,
 JSON parsers) + mork_kernel (Space, Sources, Sinks, Pure, metta_calculus).
 
-1546 unit tests pass. 8/8 integration tests from upstream `main.rs` pass
+1555 unit tests pass. 8/8 integration tests from upstream `main.rs` pass
 (lookup, positive, positive_equal, negative, bipolar, top_level,
 two_positive_equal, two_positive_equal_crossed).
 
@@ -21,13 +21,14 @@ per test pays an ~80s precompile tax. Starting the REPL once and using
 `include()` reduces per-run cost to seconds.
 
 ```bash
-# Start warm REPL (precompile happens once, ~80s)
-julia --project=. tools/mork_repl.jl
+# Start warm REPL — full Julia REPL with tab-complete + history (precompile once, ~80s)
+julia --project=. -i tools/mork_repl.jl
 
 # Inside the REPL — run tests, experiment, iterate cheaply:
-include("test/runtests.jl")       # full suite
-include("/tmp/my_test.jl")        # ad-hoc test file
-space_metta_calculus!(s)          # test interactively
+t()                               # run full test suite
+t("test/my_test.jl")              # run specific file
+include("/tmp/scratch.jl")        # ad-hoc test file
+mc("(exec 0 (, foo) (, bar))\nfoo\n")   # eval s-expr interactively
 ```
 
 **Before every commit: cold-start verification.** Revise won't catch struct
