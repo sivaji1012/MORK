@@ -159,21 +159,50 @@ function ez_symbol(z::ExprZipper)
     view(z.root.buf, z.loc+1 : z.loc + Int(tag.size))
 end
 
+"""Ensure buffer has at least `needed` bytes total, resizing if required."""
+function ez_ensure!(z::ExprZipper, needed::Int)
+    length(z.root.buf) < needed && resize!(z.root.buf, max(needed * 2, 64))
+end
+
 """Write a NewVar byte at current position and advance."""
 function ez_write_new_var!(z::ExprZipper)
+    ez_ensure!(z, z.loc)
     z.root.buf[z.loc] = item_byte(ExprNewVar())
     z.loc += 1
 end
 
 """Write a VarRef byte at current position and advance."""
 function ez_write_var_ref!(z::ExprZipper, idx::UInt8)
+    ez_ensure!(z, z.loc)
     z.root.buf[z.loc] = item_byte(ExprVarRef(idx))
     z.loc += 1
+end
+
+"""Write an arity header byte at current position and advance."""
+function ez_write_arity!(z::ExprZipper, arity::UInt8)
+    ez_ensure!(z, z.loc)
+    z.root.buf[z.loc] = item_byte(ExprArity(arity))
+    z.loc += 1
+end
+
+"""Overwrite the byte at `offset` (1-based) with a new arity — used to backpatch counted arities."""
+function ez_patch_arity!(z::ExprZipper, offset::Int, arity::UInt8)
+    z.root.buf[offset] = item_byte(ExprArity(arity))
+end
+
+"""Write a symbol header + bytes at current position and advance."""
+function ez_write_symbol!(z::ExprZipper, sym::AbstractVector{UInt8})
+    n = length(sym)
+    ez_ensure!(z, z.loc + n)
+    z.root.buf[z.loc] = item_byte(ExprSymbol(UInt8(n)))
+    copyto!(z.root.buf, z.loc + 1, sym, 1, n)
+    z.loc += 1 + n
 end
 
 """Write a slice of bytes at current position and advance."""
 function ez_write_move!(z::ExprZipper, bytes::AbstractVector{UInt8})
     n = length(bytes)
+    ez_ensure!(z, z.loc + n - 1)
     copyto!(z.root.buf, z.loc, bytes, 1, n)
     z.loc += n
 end
@@ -299,6 +328,7 @@ export ExprTag, ExprNewVar, ExprVarRef, ExprSymbol, ExprArity
 export item_byte, byte_item
 export Expr, expr_tag_at, expr_span, expr_serialize
 export ExprZipper, ez_tag, ez_item, ez_next!, ez_span, ez_symbol
-export ez_write_new_var!, ez_write_var_ref!, ez_write_move!, ez_finish_span
+export ez_ensure!, ez_write_new_var!, ez_write_var_ref!, ez_write_arity!
+export ez_patch_arity!, ez_write_symbol!, ez_write_move!, ez_finish_span
 export ExprEnv, ExprVar, ee_subsexpr, ee_var_opt, ee_offset
 export OwnedSourceItem

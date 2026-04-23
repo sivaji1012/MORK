@@ -3544,4 +3544,87 @@ using MORK
             release_permission!(wp1)
         end
     end
+
+    @testset "Frontend (bytestring_parser + json_parser)" begin
+        @testset "sexpr_to_expr — atom" begin
+            e = sexpr_to_expr("foo")
+            s = expr_serialize(e)
+            @test s == "foo"
+        end
+
+        @testset "sexpr_to_expr — variable NewVar" begin
+            e = sexpr_to_expr("\$x")
+            @test expr_tag_at(e) isa ExprNewVar
+        end
+
+        @testset "sexpr_to_expr — VarRef for repeated variable" begin
+            e = sexpr_to_expr("(\$x \$x)")
+            # arity byte, then NewVar, then VarRef(0)
+            @test byte_item(e[1]) isa ExprArity
+            @test byte_item(e[2]) isa ExprNewVar
+            @test byte_item(e[3]) isa ExprVarRef
+            @test byte_item(e[3]).idx == 0x00
+        end
+
+        @testset "sexpr_to_expr — nested compound" begin
+            e = sexpr_to_expr("(foo (bar baz))")
+            s = expr_serialize(e)
+            @test occursin("foo", s)
+            @test occursin("bar", s)
+            @test occursin("baz", s)
+        end
+
+        @testset "sexpr_to_expr — comment skipped" begin
+            e = sexpr_to_expr("; this is a comment\nfoo")
+            s = expr_serialize(e)
+            @test s == "foo"
+        end
+
+        @testset "sexpr_to_expr — arity-0 empty compound" begin
+            e = sexpr_to_expr("()")
+            @test byte_item(e[1]) isa ExprArity
+            @test byte_item(e[1]).arity == 0x00
+        end
+
+        @testset "json_parse! — number via WriteTranscriber" begin
+            p  = JSONParser("42")
+            wt = WriteTranscriber()
+            json_parse!(p, wt)
+            @test wt_result(wt) == "42"
+        end
+
+        @testset "json_parse! — WriteTranscriber roundtrip" begin
+            json_in = """{"pos": 42, "neg": -100}"""
+            p  = JSONParser(json_in)
+            wt = WriteTranscriber()
+            json_parse!(p, wt)
+            out = wt_result(wt)
+            @test occursin("42", out)
+            @test occursin("-100", out)
+        end
+
+        @testset "json_parse! — array" begin
+            p  = JSONParser("[1, 2, 3]")
+            wt = WriteTranscriber()
+            json_parse!(p, wt)
+            out = wt_result(wt)
+            @test out == "[1, 2, 3]"
+        end
+
+        @testset "json_parse! — nested object" begin
+            p  = JSONParser("""{"a": {"b": true}}""")
+            wt = WriteTranscriber()
+            json_parse!(p, wt)
+            out = wt_result(wt)
+            @test occursin("true", out)
+        end
+
+        @testset "json_parse! — string escapes" begin
+            p  = JSONParser("""{"k": "hello\\nworld"}""")
+            wt = WriteTranscriber()
+            json_parse!(p, wt)
+            out = wt_result(wt)
+            @test occursin("hello", out)
+        end
+    end
 end

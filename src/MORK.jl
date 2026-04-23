@@ -124,6 +124,10 @@ include("expr/Expr.jl")
 # Ports mork/interning/src/lib.rs + handle.rs + symbol_backing.rs.
 include("interning/Interning.jl")
 
+# Frontend parsers: MeTTa sexpr + JSON → ExprZipper.
+# Ports mork/frontend/src/bytestring_parser.rs + json_parser.rs.
+include("frontend/Frontend.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """
