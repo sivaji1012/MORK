@@ -53,6 +53,8 @@ function _cata_ascend_to_fork!(
         z_children = children   # start with caller-supplied children
         while true
             old_path_len = length(zipper_origin_path(z))
+            # Capture the OLD path BEFORE ascending (mirrors origin_path_assert_len)
+            old_path     = copy(zipper_origin_path(z))
             old_val      = zipper_val(z)
             ascended     = zipper_ascend_until!(z)
             @assert ascended "ascend_until must move"
@@ -68,7 +70,8 @@ function _cata_ascend_to_fork!(
             end
             jump_len = max(0, jump_len)
 
-            w = alg_f(child_mask, z_children, jump_len, old_val, copy(origin_path))
+            # Use old_path (pre-ascend) so that path[end-jump_len..] is valid
+            w = alg_f(child_mask, z_children, jump_len, old_val, old_path)
 
             (cc != 1 || zipper_at_root(z)) && return w
 
@@ -411,18 +414,8 @@ function ana_jumping!(wz::WriteZipperCore{V,A}, w, coalg_f::Function) where {V,A
     wz_ascend!(wz, prefix_len)
 end
 
-"""Helper: iterate bytes set in a ByteMask."""
-function bitmask_iter(mask::ByteMask)
-    result = UInt8[]
-    m = mask
-    while true
-        b = next_bit(m, UInt8(0))
-        b === nothing && break
-        push!(result, b)
-        m = unset(m, b)
-    end
-    result
-end
+"""Helper: iterate bytes set in a ByteMask (returns a ByteMaskIter)."""
+bitmask_iter(mask::ByteMask) = iter(mask)
 
 # =====================================================================
 # TrieBuilder — anamorphism helper for building tries from callbacks

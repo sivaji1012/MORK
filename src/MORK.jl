@@ -93,6 +93,10 @@ include("ProductZipper.jl")
 # Ports pathmap/src/morphisms.rs.
 include("Morphisms.jl")
 
+# ArenaCompact — compact binary trie file format + ACTZipper.
+# Ports pathmap/src/arena_compact.rs.
+include("ArenaCompact.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """

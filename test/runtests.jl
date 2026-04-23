@@ -2829,6 +2829,57 @@ using MORK
             zt_release!(t)
         end
 
+        @testset "ArenaCompact (ports arena_compact.rs)" begin
+
+            @testset "varint round-trip" begin
+                for v in [UInt64(0), UInt64(100), UInt64(247), UInt64(1000),
+                          UInt64(typemax(UInt32)), typemax(UInt64)]
+                    buf = UInt8[]
+                    n = act_push_varint!(buf, v)
+                    decoded, m = act_read_varint(buf, 1)
+                    @test decoded == v
+                    @test n == m
+                end
+            end
+
+            @testset "act_from_zipper + get_val_at round-trip" begin
+                m = PathMap{Int}()
+                set_val_at!(m, collect(UInt8,"ace"), 1)
+                set_val_at!(m, collect(UInt8,"acf"), 2)
+                set_val_at!(m, collect(UInt8,"bjk"), 3)
+                tree = act_from_zipper(m, v -> UInt64(v))
+                @test act_get_val_at(tree, collect(UInt8,"ace")) == 1
+                @test act_get_val_at(tree, collect(UInt8,"acf")) == 2
+                @test act_get_val_at(tree, collect(UInt8,"bjk")) == 3
+                @test act_get_val_at(tree, collect(UInt8,"xyz")) === nothing
+            end
+
+            @testset "ACTZipper navigates compact tree" begin
+                m = PathMap{Int}()
+                set_val_at!(m, collect(UInt8,"a"), 1)
+                set_val_at!(m, collect(UInt8,"b"), 2)
+                set_val_at!(m, collect(UInt8,"ba"), 3)
+                tree = act_from_zipper(m, v -> UInt64(v))
+                z = act_read_zipper(tree)
+                @test act_child_count(z) >= 1
+                vals = UInt64[]
+                while act_to_next_val!(z); push!(vals, act_val(z)); end
+                @test sort(vals) == [1, 2, 3]
+            end
+
+            @testset "act_save + act_open round-trip" begin
+                m = PathMap{Int}()
+                set_val_at!(m, collect(UInt8,"hello"), 42)
+                tree = act_from_zipper(m, v -> UInt64(v))
+                path = tempname() * ".act"
+                act_save(tree, path)
+                tree2 = act_open(path)
+                @test act_get_val_at(tree2, collect(UInt8,"hello")) == 42
+                rm(path)
+            end
+
+        end
+
         @testset "Morphisms — catamorphism (ports morphisms.rs)" begin
 
             @testset "cata_side_effect counts values (leaf fold)" begin
