@@ -597,7 +597,30 @@ function _to_next_get_val!(z::ReadZipperCore{V,A}) where {V,A}
     end
 end
 
-zipper_to_next_val!(z::ReadZipperCore) = _to_next_get_val!(z) !== nothing
+"""
+Structural DFS to next value.  Uses `zipper_is_val` (flag-based) instead of
+checking the returned value, which fails for `PathMap{Nothing}` where the
+value IS `nothing` and is indistinguishable from "no value" by comparison.
+"""
+function zipper_to_next_val!(z::ReadZipperCore)
+    while true
+        if zipper_descend_first_byte!(z)
+            zipper_is_val(z) && return true
+            if zipper_descend_until!(z); zipper_is_val(z) && return true; end
+        else
+            ascending = true
+            while ascending
+                if zipper_to_next_sibling_byte!(z)
+                    zipper_is_val(z) && return true
+                    ascending = false
+                else
+                    zipper_ascend_byte!(z) || return false
+                    zipper_at_root(z)      && return false
+                end
+            end
+        end
+    end
+end
 
 # =====================================================================
 # ZipperMoving remaining defaults (zipper.rs trait defaults)

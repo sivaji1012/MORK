@@ -3720,4 +3720,53 @@ using MORK
             @test result.kind == MORK.UNIF_DIFFERENCE
         end
     end
+
+    @testset "Space (ports mork/kernel/src/space.rs)" begin
+        @testset "new_space / space_val_count" begin
+            s = new_space()
+            @test space_val_count(s) == 0
+        end
+
+        @testset "space_add_all_sexpr! — single atom" begin
+            s = new_space()
+            n = space_add_all_sexpr!(s, "foo")
+            @test n == 1
+            @test space_val_count(s) == 1
+        end
+
+        @testset "space_add_all_sexpr! — multiple expressions" begin
+            s = new_space()
+            n = space_add_all_sexpr!(s, "foo bar (baz qux)")
+            @test n == 3
+            @test space_val_count(s) == 3
+        end
+
+        @testset "space_remove_all_sexpr!" begin
+            s = new_space()
+            space_add_all_sexpr!(s, "foo bar")
+            @test space_val_count(s) == 2
+            space_remove_all_sexpr!(s, "foo")
+            @test space_val_count(s) == 1
+        end
+
+        @testset "space_dump_all_sexpr roundtrip" begin
+            s = new_space()
+            space_add_all_sexpr!(s, "foo")
+            out = space_dump_all_sexpr(s)
+            @test occursin("foo", out)
+        end
+
+        @testset "space_load_json! — object" begin
+            s = new_space()
+            n = space_load_json!(s, """{"key": "val"}""")
+            @test n >= 1
+        end
+
+        @testset "space_bitmask constants" begin
+            # ExprArity(0) = 0x00: bucket=1, bit=0
+            @test (SPACE_ARITIES[1] & UInt64(1)) != 0
+            # ExprSymbol(1) = 0xC1: bucket=4 (0xC0>>6=3, +1=4), bit=1
+            @test (SPACE_SIZES[4] & UInt64(2)) != 0
+        end
+    end
 end
