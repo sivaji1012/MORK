@@ -2889,6 +2889,76 @@ using MORK
             zt_release!(t)
         end
 
+        @testset "PathsSerialization (ports paths_serialization.rs)" begin
+
+            @testset "serialize + deserialize round-trip" begin
+                m = PathMap{Nothing}()
+                words = ["arrow","bow","cannon","roman","romane","romulus","rubens","ruber"]
+                for w in words; set_val_at!(m, collect(UInt8, w), nothing); end
+
+                buf = IOBuffer()
+                stats = serialize_paths(m, buf)
+                @test stats.path_count == length(words)
+                @test stats.bytes_out > 0
+
+                m2 = PathMap{Nothing}()
+                seekstart(buf)
+                stats2 = deserialize_paths(m2, buf, nothing)
+                @test stats2.path_count == length(words)
+
+                # All original paths should be in m2
+                for w in words
+                    @test path_exists_at(m2, collect(UInt8, w))
+                end
+            end
+
+            @testset "auxdata round-trip preserves values" begin
+                m = PathMap{Int}()
+                pairs = [("a", 1), ("b", 2), ("ba", 3)]
+                for (w, v) in pairs; set_val_at!(m, collect(UInt8, w), v); end
+
+                collected_vals = Int[]
+                buf = IOBuffer()
+                serialize_paths_with_auxdata(m, buf, (_, _, v) -> push!(collected_vals, v))
+                @test sort(collected_vals) == [1, 2, 3]
+
+                m2 = PathMap{Int}()
+                seekstart(buf)
+                deserialize_paths_with_auxdata(m2, buf, (k, _) -> collected_vals[k+1])
+                for (w, v) in pairs
+                    @test get_val_at(m2, collect(UInt8, w)) == v
+                end
+            end
+
+        end
+
+        @testset "EmptyZipper (ports empty_zipper.rs)" begin
+
+            @testset "basic properties" begin
+                z = EmptyZipper()
+                @test !ez_path_exists(z)
+                @test !ez_is_val(z)
+                @test ez_child_count(z) == 0
+                @test ez_at_root(z)
+                @test isempty(ez_path(z))
+            end
+
+            @testset "navigation works but finds nothing" begin
+                z = EmptyZipper()
+                ez_descend_to!(z, collect(UInt8, "abc"))
+                @test collect(ez_path(z)) == collect(UInt8, "abc")
+                @test !ez_path_exists(z)
+                @test ez_ascend!(z, 3)
+                @test isempty(ez_path(z))
+            end
+
+            @testset "to_next_val returns false" begin
+                z = EmptyZipper()
+                @test !ez_to_next_val!(z)
+            end
+
+        end
+
         @testset "ArenaCompact (ports arena_compact.rs)" begin
 
             @testset "varint round-trip" begin

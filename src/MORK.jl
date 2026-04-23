@@ -98,6 +98,14 @@ include("Morphisms.jl")
 # Ports pathmap/src/arena_compact.rs.
 include("ArenaCompact.jl")
 
+# PathsSerialization — .paths zlib-compressed trie serialization.
+# Ports pathmap/src/paths_serialization.rs.
+include("PathsSerialization.jl")
+
+# EmptyZipper — zipper over an empty trie.
+# Ports pathmap/src/empty_zipper.rs.
+include("EmptyZipper.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """
