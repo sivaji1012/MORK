@@ -145,6 +145,10 @@ include("frontend/Frontend.jl")
 # Ports mork/kernel/src/sources.rs.
 include("kernel/Sources.jl")
 
+# Kernel: write sinks (add/remove/head/count/sum/and/etc.).
+# Ports mork/kernel/src/sinks.rs.
+include("kernel/Sinks.jl")
+
 # Kernel: Space struct + pattern-matching query engine.
 # Ports mork/kernel/src/space.rs (core subset; Z3/mmap/coroutine paths stubbed).
 include("kernel/Space.jl")
