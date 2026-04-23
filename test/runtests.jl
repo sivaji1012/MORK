@@ -226,6 +226,48 @@ using MORK
             @test r isa AlgResElement && r.value === nothing
         end
 
+        @testset "Dict lattice (ports ring.rs HashMap SetLattice)" begin
+            a = Dict{String,Int}("x"=>1, "y"=>2)
+            b = Dict{String,Int}("x"=>3, "z"=>4)
+            r = pjoin(a, b)
+            @test r isa AlgResElement
+            d = r.value
+            @test d["x"] == max(1,3)   # max via pjoin on Int
+            @test d["y"] == 2           # only in a
+            @test d["z"] == 4           # only in b
+
+            s = pmeet(a, b)
+            @test s isa AlgResElement || s isa AlgResNone
+            # meet of disjoint keys = empty → None
+            a2 = Dict{String,Int}("p"=>1)
+            b2 = Dict{String,Int}("q"=>2)
+            @test pmeet(a2, b2) isa AlgResNone
+
+            sub = psubtract(a, Dict{String,Int}("x"=>1))
+            # subtracting x=1 from x=1 → None for that key; only y remains
+            @test sub isa AlgResElement
+            @test haskey(sub.value, "y")
+            @test !haskey(sub.value, "x")  # x-x = None
+        end
+
+        @testset "Set lattice (ports ring.rs HashSet SetLattice)" begin
+            a = Set(["a","b","c"])
+            b = Set(["b","c","d"])
+            r = pjoin(a, b)
+            @test r isa AlgResElement
+            @test r.value == Set(["a","b","c","d"])
+
+            s = pmeet(a, b)
+            @test s isa AlgResElement
+            @test r.value ⊇ s.value
+
+            sub = psubtract(a, b)
+            @test sub isa AlgResElement
+            @test sub.value == Set(["a"])
+
+            @test psubtract(Set(["x"]), Set(["x"])) isa AlgResNone
+        end
+
         @testset "Utils — Bits4 primitives" begin
             empty = MORK.EMPTY_BITS4
             full  = MORK.FULL_BITS4

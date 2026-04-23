@@ -520,6 +520,12 @@ for T in (UInt8, UInt16, UInt32, UInt64, UInt128, Int8, Int16, Int32, Int64, Int
     end
 end
 
+# psubtract for signed ints: equal → None, otherwise Identity(SELF)
+for T in (Int8, Int16, Int32, Int64, Int128)
+    @eval psubtract(a::$T, b::$T)::AlgebraicResult{$T} =
+        a == b ? AlgResNone() : AlgResIdentity(SELF_IDENT)
+end
+
 # psubtract for unsigned ints: saturating subtraction
 for T in (UInt8, UInt16, UInt32, UInt64, UInt128)
     @eval begin
@@ -751,6 +757,121 @@ end
 # =====================================================================
 # Exports
 # =====================================================================
+
+# =====================================================================
+# SetLattice — Dict{K,V} and Set{K} lattice ops
+# Ports ring.rs set_lattice! / set_dist_lattice! macros + impls.
+# =====================================================================
+
+function _set_lattice_update_ident!(result, inner_result, key, sv, ov,
+                                     is_ident::Ref{Bool}, is_cident::Ref{Bool})
+    if inner_result isa AlgResNone
+        is_ident[] = false; is_cident[] = false
+    elseif inner_result isa AlgResElement
+        is_ident[] = false; is_cident[] = false
+        result[key] = inner_result.value
+    else  # Identity
+        mask = inner_result.mask
+        if mask & SELF_IDENT > 0
+            result[key] = sv
+        else
+            is_ident[] = false
+        end
+        if mask & COUNTER_IDENT > 0
+            if mask & SELF_IDENT == 0; result[key] = ov; end
+        else
+            is_cident[] = false
+        end
+    end
+end
+
+function _set_lattice_integrate(result, is_ident, is_cident, self_len, other_len)
+    isempty(result) && return AlgResNone()
+    mask = 0x0
+    is_ident  && length(result) == self_len  && (mask |= SELF_IDENT)
+    is_cident && length(result) == other_len && (mask |= COUNTER_IDENT)
+    mask > 0 ? AlgResIdentity(mask) : AlgResElement(result)
+end
+
+function pjoin(a::Dict{K,V}, b::Dict{K,V}) where {K,V}
+    result = Dict{K,V}()
+    is_ident  = Ref(length(a) >= length(b))
+    is_cident = Ref(length(a) <= length(b))
+    for (k, av) in a
+        if haskey(b, k)
+            _set_lattice_update_ident!(result, pjoin(av, b[k]), k, av, b[k], is_ident, is_cident)
+        else
+            result[k] = av; is_cident[] = false
+        end
+    end
+    for (k, bv) in b
+        if !haskey(a, k); result[k] = bv; is_ident[] = false; end
+    end
+    _set_lattice_integrate(result, is_ident[], is_cident[], length(a), length(b))
+end
+
+function pmeet(a::Dict{K,V}, b::Dict{K,V}) where {K,V}
+    result = Dict{K,V}()
+    is_ident  = Ref(true)
+    is_cident = Ref(true)
+    smaller, larger = length(a) < length(b) ? (a, b) : (b, a)
+    switched = length(a) >= length(b)
+    for (k, sv) in smaller
+        if haskey(larger, k)
+            ov = larger[k]
+            r  = pmeet(sv, ov)
+            _set_lattice_update_ident!(result, r, k, sv, ov, is_ident, is_cident)
+        else
+            is_ident[] = false
+        end
+    end
+    switched && begin tmp = is_ident[]; is_ident[] = is_cident[]; is_cident[] = tmp; end
+    _set_lattice_integrate(result, is_ident[], is_cident[], length(a), length(b))
+end
+
+function psubtract(a::Dict{K,V}, b::Dict{K,V}) where {K,V}
+    is_ident = Ref(true)
+    result   = copy(a)
+    src, scan = length(a) > length(b) ? (b, true) : (a, false)
+    for (k, other_v) in src
+        self_v = scan ? get(a, k, nothing) : other_v
+        other_v2 = scan ? other_v : get(b, k, nothing)
+        self_v === nothing || other_v2 === nothing && continue
+        r = psubtract(self_v, other_v2)
+        if r isa AlgResElement
+            result[k] = r.value; is_ident[] = false
+        elseif r isa AlgResNone
+            delete!(result, k); is_ident[] = false
+        end
+    end
+    isempty(result) ? AlgResNone() :
+    is_ident[]      ? AlgResIdentity(SELF_IDENT) :
+    AlgResElement(result)
+end
+
+# Set{K} lattice (values are Nothing)
+pjoin(a::Set{K}, b::Set{K}) where K = begin
+    d = Dict{K,Nothing}(k => nothing for k in a)
+    r = pjoin(d, Dict{K,Nothing}(k => nothing for k in b))
+    r isa AlgResNone ? AlgResNone() :
+    r isa AlgResIdentity ? AlgResIdentity(r.mask) :
+    AlgResElement(Set{K}(keys(r.value)))
+end
+
+pmeet(a::Set{K}, b::Set{K}) where K = begin
+    d = Dict{K,Nothing}(k => nothing for k in a)
+    r = pmeet(d, Dict{K,Nothing}(k => nothing for k in b))
+    r isa AlgResNone ? AlgResNone() :
+    r isa AlgResIdentity ? AlgResIdentity(r.mask) :
+    AlgResElement(Set{K}(keys(r.value)))
+end
+
+psubtract(a::Set{K}, b::Set{K}) where K = begin
+    result = setdiff(a, b)
+    isempty(result) ? AlgResNone() :
+    result == a     ? AlgResIdentity(SELF_IDENT) :
+    AlgResElement(result)
+end
 
 export SELF_IDENT, COUNTER_IDENT
 export AlgebraicResult, AlgResNone, AlgResIdentity, AlgResElement
