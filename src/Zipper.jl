@@ -550,6 +550,244 @@ end
 zipper_to_next_val!(z::ReadZipperCore) = _to_next_get_val!(z) !== nothing
 
 # =====================================================================
+# ZipperMoving remaining defaults (zipper.rs trait defaults)
+# =====================================================================
+
+"""
+    zipper_to_next_sibling_byte!(z) → Bool
+Mirrors `ZipperMoving::to_next_sibling_byte`.
+"""
+function zipper_to_next_sibling_byte!(z::ReadZipperCore{V,A}) where {V,A}
+    _prepare_buffers!(z)
+    cur_path = zipper_path(z)
+    isempty(cur_path) && return false
+    cur_byte = last(cur_path)
+    !zipper_ascend_byte!(z) && return false
+    mask = zipper_child_mask(z)
+    nxt = next_bit(mask, cur_byte)
+    if nxt !== nothing
+        zipper_descend_to_byte!(z, nxt)
+        return true
+    else
+        zipper_descend_to_byte!(z, cur_byte)
+        return false
+    end
+end
+
+"""
+    zipper_to_prev_sibling_byte!(z) → Bool
+Mirrors `ZipperMoving::to_prev_sibling_byte`.
+"""
+function zipper_to_prev_sibling_byte!(z::ReadZipperCore{V,A}) where {V,A}
+    _prepare_buffers!(z)
+    cur_path = zipper_path(z)
+    isempty(cur_path) && return false
+    cur_byte = last(cur_path)
+    !zipper_ascend_byte!(z) && return false
+    mask = zipper_child_mask(z)
+    prv = prev_bit(mask, cur_byte)
+    if prv !== nothing
+        zipper_descend_to_byte!(z, prv)
+        return true
+    else
+        zipper_descend_to_byte!(z, cur_byte)
+        return false
+    end
+end
+
+"""
+    zipper_to_next_step!(z) → Bool
+One DFS step: descend to first child, or advance to next sibling.
+Mirrors `ZipperMoving::to_next_step`.
+"""
+function zipper_to_next_step!(z::ReadZipperCore{V,A}) where {V,A}
+    if zipper_child_count(z) == 0
+        while !zipper_to_next_sibling_byte!(z)
+            !zipper_ascend_byte!(z) && return false
+        end
+    else
+        return zipper_descend_first_byte!(z)
+    end
+    true
+end
+
+"""
+    zipper_descend_last_byte!(z) → Bool
+Descend to the lexicographically last child.
+Mirrors `ZipperMoving::descend_last_byte`.
+"""
+function zipper_descend_last_byte!(z::ReadZipperCore{V,A}) where {V,A}
+    cc = zipper_child_count(z)
+    cc == 0 && return false
+    zipper_descend_indexed_byte!(z, cc - 1)
+end
+
+"""
+    zipper_descend_to_val!(z, k) → Int
+Descend along `k`, stopping at the first val or end of path.
+Returns bytes consumed.  Mirrors `ZipperMoving::descend_to_val`.
+"""
+function zipper_descend_to_val!(z::ReadZipperCore{V,A}, k) where {V,A}
+    _prepare_buffers!(z)
+    kv = collect(UInt8, k)
+    i = 0
+    while i < length(kv)
+        zipper_descend_to_byte!(z, kv[i+1])
+        if !zipper_path_exists(z)
+            zipper_ascend_byte!(z)
+            return i
+        end
+        i += 1
+        zipper_is_val(z) && return i
+    end
+    i
+end
+
+"""
+    zipper_descend_to_existing!(z, k) → Int
+Descend along `k`, stopping where the path ceases to exist.
+Returns bytes consumed.  Mirrors `ZipperMoving::descend_to_existing`.
+"""
+function zipper_descend_to_existing!(z::ReadZipperCore{V,A}, k) where {V,A}
+    _prepare_buffers!(z)
+    kv = collect(UInt8, k)
+    i = 0
+    while i < length(kv)
+        zipper_descend_to_byte!(z, kv[i+1])
+        if !zipper_path_exists(z)
+            zipper_ascend_byte!(z)
+            return i
+        end
+        i += 1
+    end
+    i
+end
+
+"""
+    zipper_descend_last_path!(z) → Bool
+Descend to the lexicographically last leaf from the current focus.
+Mirrors `ZipperIteration::descend_last_path`.
+"""
+function zipper_descend_last_path!(z::ReadZipperCore{V,A}) where {V,A}
+    any = false
+    while zipper_descend_last_byte!(z)
+        any = true
+        zipper_descend_until!(z)
+    end
+    any
+end
+
+"""
+    zipper_descend_until_max_bytes!(z, max_bytes) → Bool
+Like `zipper_descend_until!` but limited to `max_bytes` descent.
+Mirrors `ZipperMoving::descend_until_max_bytes`.
+"""
+function zipper_descend_until_max_bytes!(z::ReadZipperCore{V,A}, max_bytes::Int) where {V,A}
+    max_bytes == 0 && return false
+    target_len = length(zipper_path(z)) + max_bytes
+    descended = zipper_descend_until!(z)
+    cur_len = length(zipper_path(z))
+    if cur_len > target_len
+        zipper_ascend!(z, cur_len - target_len)
+    end
+    descended
+end
+
+"""
+    zipper_move_to_path!(z, path) → Int
+Navigate the zipper to `path` (relative to root), reusing common prefix.
+Returns bytes of overlap.  Mirrors `ZipperMoving::move_to_path`.
+"""
+function zipper_move_to_path!(z::ReadZipperCore{V,A}, path) where {V,A}
+    _prepare_buffers!(z)
+    pv = collect(UInt8, path)
+    p  = zipper_path(z)
+    overlap = find_prefix_overlap(pv, p)
+    to_ascend = length(p) - overlap
+    if overlap == 0
+        zipper_reset!(z)
+        zipper_descend_to!(z, pv)
+    else
+        zipper_ascend!(z, to_ascend)
+        zipper_descend_to!(z, pv[overlap+1:end])
+    end
+    overlap
+end
+
+# =====================================================================
+# ZipperIteration — k-path traversal
+# =====================================================================
+
+function _zipper_k_path_internal!(z::ReadZipperCore, k::Int, base_idx::Int)
+    while true
+        if length(zipper_path(z)) < base_idx + k
+            while zipper_descend_first_byte!(z)
+                length(zipper_path(z)) == base_idx + k && return true
+            end
+        end
+        if zipper_to_next_sibling_byte!(z)
+            length(zipper_path(z)) == base_idx + k && return true
+            continue
+        end
+        while length(zipper_path(z)) > base_idx
+            zipper_ascend_byte!(z)
+            length(zipper_path(z)) == base_idx && return false
+            zipper_to_next_sibling_byte!(z) && break
+        end
+    end
+end
+
+"""Descend to first path exactly `k` bytes from current focus. Mirrors `descend_first_k_path`."""
+zipper_descend_first_k_path!(z::ReadZipperCore, k::Int) =
+    _zipper_k_path_internal!(z, k, length(zipper_path(z)))
+
+"""Move to next path at same depth (k steps from common root). Mirrors `to_next_k_path`."""
+function zipper_to_next_k_path!(z::ReadZipperCore, k::Int)
+    length(zipper_path(z)) >= k || return false
+    _zipper_k_path_internal!(z, k, length(zipper_path(z)) - k)
+end
+
+# =====================================================================
+# ZipperForking — fork a read sub-zipper at the current focus
+# =====================================================================
+
+"""
+    zipper_fork!(z) → ReadZipperCore
+New read zipper rooted at the current focus position.
+Mirrors `fork_read_zipper` / `new_with_node_and_path_internal_in`:
+creates a new zipper using root_node + current absolute path so that
+the fork's `path()` is empty but its subtrie equals the current subtrie.
+"""
+function zipper_fork!(z::ReadZipperCore{V,A}) where {V,A}
+    _prepare_buffers!(z)
+    abs_path = copy(z.prefix_buf)
+    path_len = length(abs_path)
+    fork_val = _is_val_internal(z) ? _get_val(z) : nothing
+    # Always traverse from root (key_start_0=0); root_prefix_len=path_len so that
+    # the forked zipper's path() returns [] (positioned at fork point).
+    # Mirrors ReadZipperCore::fork_read_zipper (zipper.rs:1457).
+    ReadZipperCore_at_path(z.root_node, abs_path, path_len, 0, fork_val, z.alloc)
+end
+
+# =====================================================================
+# rz_ aliases — short-form ReadZipperCore API
+# Used by ReadZipperTracked and external callers.
+# =====================================================================
+
+@inline rz_path_exists(z::ReadZipperCore)       = zipper_path_exists(z)
+@inline rz_is_val(z::ReadZipperCore)             = zipper_is_val(z)
+@inline rz_get_val(z::ReadZipperCore{V}) where V = zipper_val(z)
+@inline rz_path(z::ReadZipperCore)               = zipper_path(z)
+@inline rz_child_count(z::ReadZipperCore)        = zipper_child_count(z)
+@inline rz_child_mask(z::ReadZipperCore)         = zipper_child_mask(z)
+@inline rz_val_count(z::ReadZipperCore)          = zipper_val_count(z)
+@inline rz_to_next_val!(z::ReadZipperCore)       = zipper_to_next_val!(z)
+@inline rz_descend_to!(z::ReadZipperCore, k)     = zipper_descend_to!(z, k)
+@inline rz_ascend!(z::ReadZipperCore, n::Int=1)  = zipper_ascend!(z, n)
+@inline rz_reset!(z::ReadZipperCore)             = zipper_reset!(z)
+@inline rz_fork!(z::ReadZipperCore)              = zipper_fork!(z)
+
+# =====================================================================
 # PathMap container (ports pathmap/src/trie_map.rs — read API)
 # =====================================================================
 
@@ -755,6 +993,14 @@ export zipper_descend_indexed_byte!, zipper_descend_first_byte!
 export zipper_descend_until!
 export zipper_ascend!, zipper_ascend_byte!
 export zipper_ascend_until!, zipper_ascend_until_branch!
-export zipper_to_next_val!
+export zipper_to_next_val!, zipper_to_next_step!
+export zipper_to_next_sibling_byte!, zipper_to_prev_sibling_byte!
+export zipper_descend_last_byte!, zipper_descend_last_path!
+export zipper_descend_to_val!, zipper_descend_to_existing!
+export zipper_descend_until_max_bytes!, zipper_move_to_path!
+export zipper_descend_first_k_path!, zipper_to_next_k_path!
+export zipper_fork!
+export rz_path_exists, rz_is_val, rz_get_val, rz_path, rz_child_count, rz_child_mask
+export rz_val_count, rz_to_next_val!, rz_descend_to!, rz_ascend!, rz_reset!, rz_fork!
 export PathMap, _ensure_root!, read_zipper, read_zipper_at_path, get_val_at, path_exists_at, val_count
 export pjoin, pmeet, psubtract, prestrict

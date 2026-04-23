@@ -1965,6 +1965,102 @@ using MORK
             @test path_exists_at(m, collect(UInt8, "yes"))
             @test !path_exists_at(m, collect(UInt8, "no"))
         end
+
+        # ---- ZipperMoving new defaults ----
+
+        @testset "zipper_to_next_sibling_byte!" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8,"a"), 1)
+            set_val_at!(m, collect(UInt8,"b"), 2)
+            set_val_at!(m, collect(UInt8,"c"), 3)
+            z = read_zipper(m)
+            zipper_descend_first_byte!(z)
+            @test last(zipper_path(z)) == UInt8('a')
+            @test zipper_to_next_sibling_byte!(z)
+            @test last(zipper_path(z)) == UInt8('b')
+            @test zipper_to_next_sibling_byte!(z)
+            @test last(zipper_path(z)) == UInt8('c')
+            @test !zipper_to_next_sibling_byte!(z)  # last sibling
+        end
+
+        @testset "zipper_descend_last_byte! / zipper_descend_last_path!" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8,"a"), 1)
+            set_val_at!(m, collect(UInt8,"b"), 2)
+            z = read_zipper(m)
+            @test zipper_descend_last_byte!(z)
+            @test last(zipper_path(z)) == UInt8('b')
+        end
+
+        @testset "zipper_to_next_val! iterates all values in DFS order" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8,"a"),  1)
+            set_val_at!(m, collect(UInt8,"ba"), 2)
+            set_val_at!(m, collect(UInt8,"bb"), 3)
+            set_val_at!(m, collect(UInt8,"c"),  4)
+            z = read_zipper(m)
+            collected = V[]
+            while zipper_to_next_val!(z)
+                push!(collected, zipper_val(z))
+            end
+            @test sort(collected) == [1, 2, 3, 4]
+        end
+
+        @testset "zipper_descend_to_val! stops at first val along path" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8,"ab"), 10)
+            set_val_at!(m, collect(UInt8,"abc"), 20)
+            z = read_zipper(m)
+            steps = zipper_descend_to_val!(z, collect(UInt8,"abc"))
+            @test steps == 2   # stops at "ab" which has a val
+            @test zipper_is_val(z)
+        end
+
+        @testset "zipper_move_to_path! navigates to absolute path" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8,"foo"), 1)
+            set_val_at!(m, collect(UInt8,"bar"), 2)
+            z = read_zipper(m)
+            zipper_descend_to!(z, collect(UInt8,"foo"))
+            @test zipper_is_val(z)
+            zipper_move_to_path!(z, collect(UInt8,"bar"))
+            @test zipper_is_val(z)
+            @test zipper_val(z) == 2
+        end
+
+        @testset "zipper_fork! creates sub-zipper at focus" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8,"ab"), 1)
+            set_val_at!(m, collect(UInt8,"ac"), 2)
+            z = read_zipper(m)
+            zipper_descend_to_byte!(z, UInt8('a'))
+            sub = zipper_fork!(z)
+            # sub rooted at 'a': should see both "b" and "c" as children
+            @test zipper_child_count(sub) == 2
+        end
+
+        @testset "zipper_to_next_step! does DFS one step at a time" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8,"a"), 1)
+            set_val_at!(m, collect(UInt8,"b"), 2)
+            z = read_zipper(m)
+            @test zipper_to_next_step!(z)   # descend to 'a'
+            @test zipper_to_next_step!(z)   # sibling 'b'
+            @test !zipper_to_next_step!(z)  # no more
+        end
+
+        @testset "rz_ aliases work" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8,"x"), 99)
+            z = read_zipper(m)
+            @test !rz_is_val(z)
+            rz_descend_to!(z, collect(UInt8,"x"))
+            @test rz_is_val(z)
+            @test rz_get_val(z) == 99
+            @test rz_path(z) == collect(UInt8,"x")
+            rz_reset!(z)
+            @test isempty(rz_path(z))
+        end
     end
 
     @testset "PathMap lattice ops (ports trie_map.rs Lattice/DistributiveLattice/Quantale)" begin
