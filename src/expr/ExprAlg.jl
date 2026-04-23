@@ -1,0 +1,445 @@
+"""
+ExprAlg — port of the algorithmic half of `mork/expr/src/lib.rs`.
+
+Provides:
+  - `expr_traverseh`   : generic catamorphism over flat byte expressions
+  - `ee_args!`         : push child ExprEnvs of a compound onto a stack
+  - `UnificationFailure` / `expr_unify`  : most-general unifier
+  - `expr_apply`       : variable substitution
+
+Julia translation notes
+========================
+  - Rust `traverseh!` macro (SmallVec stack) → Julia function + Vector stack
+  - Rust `BTreeMap<ExprVar, ExprEnv>` → Julia `Dict{ExprVar, ExprEnv}`
+  - Rust `gxhash::HashSet<(ExprEnv, ExprEnv)>` → Julia `Set{...}` (skipped for simplicity)
+  - 0-based byte offsets preserved; 1-based buf indexing via `buf[j+1]`
+"""
+
+# =====================================================================
+# expr_traverseh — generic tree fold over a flat Expr (ports traverseh!)
+# =====================================================================
+
+"""
+    expr_traverseh(h0, x, j0, new_var_cb, var_ref_cb, symbol_cb, zero_cb, add_cb, finalize_cb)
+          → (h, value, j_end)
+
+Generic catamorphism over the flat byte encoding of expression `x`
+starting at byte offset `j0` (0-based, same convention as Rust upstream).
+
+Each callback receives the current `h` state and returns `(new_h, result)`:
+  - `new_var_cb(h, offset)            → (new_h, value)`
+  - `var_ref_cb(h, offset, idx)       → (new_h, value)`
+  - `symbol_cb(h, offset, slice)      → (new_h, value)`
+  - `zero_cb(h, offset, arity)        → (new_h, acc)`   (at arity node, before children)
+  - `add_cb(h, offset, acc, sub)      → (new_h, new_acc)` (fold each child into acc)
+  - `finalize_cb(h, offset, acc)      → (new_h, value)`  (after last child)
+
+Returns `(h_final, final_value, j_end)` where `j_end` is the 0-based offset just
+past the last consumed byte.  Mirrors the return of `traverseh!` in mork_expr.
+"""
+function expr_traverseh(h0, x::MORK.Expr, j0::Int,
+                        new_var_cb, var_ref_cb, symbol_cb, zero_cb, add_cb, finalize_cb)
+    h = h0
+    # stack entries: (remaining_children::UInt8, accumulated_value)
+    stack = Tuple{UInt8, Any}[]
+    j = j0
+
+    while true
+        b   = x.buf[j + 1]    # j is 0-based; buf is 1-based
+        tag = byte_item(b)
+
+        local value
+        if tag isa ExprNewVar
+            j += 1
+            h, value = new_var_cb(h, j - 1)
+        elseif tag isa ExprVarRef
+            j += 1
+            h, value = var_ref_cb(h, j - 1, tag.idx)
+        elseif tag isa ExprSymbol
+            s  = Int(tag.size)
+            sl = view(x.buf, j+2 : j+1+s)
+            h, value = symbol_cb(h, j, sl)
+            j += s + 1
+        elseif tag isa ExprArity
+            h, acc = zero_cb(h, j, tag.arity)
+            j += 1
+            if tag.arity == 0
+                h, value = finalize_cb(h, j, acc)
+            else
+                push!(stack, (tag.arity, acc))
+                continue
+            end
+        else
+            error("unknown tag byte 0x$(string(b, base=16))")
+        end
+
+        # Popping loop: fold value into parent stack frame
+        while true
+            isempty(stack) && return (h, value, j)
+            k, acc = stack[end]
+            h, new_acc = add_cb(h, j, acc, value)
+            k -= UInt8(1)
+            if k == 0
+                pop!(stack)
+                h, value = finalize_cb(h, j, new_acc)
+            else
+                stack[end] = (k, new_acc)
+                break
+            end
+        end
+    end
+end
+
+# Convenience: traverse over the sub-expression of an ExprEnv
+function _ee_traverseh(h0, ee::ExprEnv, new_var_cb, var_ref_cb, symbol_cb, zero_cb, add_cb, finalize_cb)
+    expr_traverseh(h0, ee.base, Int(ee.offset), new_var_cb, var_ref_cb, symbol_cb, zero_cb, add_cb, finalize_cb)
+end
+
+# =====================================================================
+# ee_args! — push child ExprEnvs of a compound onto `dest`
+# =====================================================================
+
+"""
+    ee_args!(ee, dest)
+
+Push the immediate child `ExprEnv`s of compound `ee` onto `dest`.
+No-op for atoms (NewVar, VarRef, Symbol).
+Mirrors `ExprEnv::args` in mork_expr.
+"""
+function ee_args!(ee::ExprEnv, dest::Vector{ExprEnv})
+    tag = byte_item(ee.base.buf[Int(ee.offset) + 1])
+    tag isa ExprArity || return
+    k = Int(tag.arity)
+    env = ExprEnv(ee.n, ee.v, ee.offset + UInt32(1), ee.base)
+    for _ in 1:k
+        start_j = Int(env.offset)
+        # Measure byte span + new-var count using traverseh
+        (new_var_count, _, j_end) = _ee_traverseh(
+            UInt8(0), env,
+            (h, o)       -> (h + UInt8(1), nothing),  # new_var: count it
+            (h, o, r)    -> (h, nothing),              # var_ref: noop
+            (h, o, sl)   -> (h, nothing),              # symbol:  noop
+            (h, o, a)    -> (h, nothing),              # zero:    noop
+            (h, o, x, y) -> (h, nothing),              # add:     noop
+            (h, o, acc)  -> (h, acc))                  # finalize: identity
+        push!(dest, ExprEnv(ee.n, env.v, env.offset, ee.base))
+        span = j_end - start_j    # number of bytes this sub-expression occupies
+        env = ExprEnv(env.n, env.v + new_var_count, env.offset + UInt32(span), env.base)
+    end
+end
+
+# =====================================================================
+# UnificationFailure
+# =====================================================================
+
+"""
+    UnificationFailure
+
+Reason for unification failure.  Mirrors `UnificationFailure` in mork_expr.
+"""
+@enum UnificationFailureKind begin
+    UNIF_OCCURS
+    UNIF_DIFFERENCE
+    UNIF_MAX_ITER
+end
+
+struct UnificationFailure
+    kind    ::UnificationFailureKind
+    lhs     ::ExprEnv
+    rhs     ::ExprEnv
+    var     ::ExprVar
+    iters   ::Int
+end
+
+const _EMPTY_EE = ExprEnv(UInt8(0), UInt8(0), UInt32(0), MORK.Expr(UInt8[]))
+
+UnificationFailure(::Val{:occurs}, var::ExprVar, rhs::ExprEnv) =
+    UnificationFailure(UNIF_OCCURS, _EMPTY_EE, rhs, var, 0)
+UnificationFailure(::Val{:difference}, lhs::ExprEnv, rhs::ExprEnv) =
+    UnificationFailure(UNIF_DIFFERENCE, lhs, rhs, (UInt8(0),UInt8(0)), 0)
+UnificationFailure(::Val{:max_iter}, n::Int) =
+    UnificationFailure(UNIF_MAX_ITER, _EMPTY_EE, _EMPTY_EE, (UInt8(0),UInt8(0)), n)
+
+# =====================================================================
+# expr_unify — Robinson unification
+# =====================================================================
+
+const MAX_UNIFY_ITER = 1000
+
+"""
+    expr_unify(stack) → Union{Dict{ExprVar,ExprEnv}, UnificationFailure}
+
+Unify pairs of `ExprEnv`s. Returns the most-general bindings map or a failure.
+Mirrors `unify` in mork_expr.
+"""
+function expr_unify(stack::Vector{Tuple{ExprEnv, ExprEnv}}) :: Union{Dict{ExprVar, ExprEnv}, UnificationFailure}
+    bindings = Dict{ExprVar, ExprEnv}()
+    iters    = 0
+
+    # deref: follow chain of bindings
+    function _deref(t::ExprEnv)
+        while true
+            vo = ee_var_opt(t)
+            vo === nothing && return t
+            bound = get(bindings, vo, nothing)
+            bound === nothing && return t
+            t = bound
+        end
+    end
+
+    # occurs check: does var xvar appear in expression e?
+    # h = (new_var_counter::UInt8, found::Bool)
+    function _occurs_check(xvar::ExprVar, e::ExprEnv) :: Bool
+        xvar[1] != e.n && return false
+        (_, found, _) = _ee_traverseh(
+            (UInt8(e.v), false), e,
+            (h, o)       -> begin (cnt, f) = h; eq = (cnt == xvar[2]); ((cnt + UInt8(1), f || eq), nothing) end,
+            (h, o, r)    -> ((h[1], h[2] || r == xvar[2]), nothing),
+            (h, o, sl)   -> (h, nothing),
+            (h, o, a)    -> (h, false),
+            (h, o, x, y) -> (h, x || y),
+            (h, o, acc)  -> (h, acc))
+        return found[2]
+    end
+
+    # is_unbound: follow variable chain, true if ultimately unbound
+    function _is_unbound(v::ExprVar) :: Bool
+        vv = v
+        while true
+            bound = get(bindings, vv, nothing)
+            bound === nothing && return true
+            vo = ee_var_opt(bound)
+            vo === nothing && return false
+            vv = vo
+        end
+    end
+
+    while !isempty(stack)
+        iters > MAX_UNIFY_ITER && return UnificationFailure(Val(:max_iter), iters)
+        iters += 1
+
+        xpop, ypop = pop!(stack)
+        dt1 = _deref(xpop)
+        dt2 = _deref(ypop)
+
+        vx = ee_var_opt(dt1)
+        vy = ee_var_opt(dt2)
+
+        if vx === nothing && vy === nothing
+            # Both ground — must match structurally
+            # Push pairs of children
+            b1  = dt1.base.buf[Int(dt1.offset) + 1]
+            b2  = dt2.base.buf[Int(dt2.offset) + 1]
+            tag1, tag2 = byte_item(b1), byte_item(b2)
+            if typeof(tag1) != typeof(tag2)
+                return UnificationFailure(Val(:difference), dt1, dt2)
+            end
+            if tag1 isa ExprSymbol
+                s1 = Int(tag1.size); s2 = Int(tag2.size)
+                if s1 != s2; return UnificationFailure(Val(:difference), dt1, dt2); end
+                o1 = Int(dt1.offset); o2 = Int(dt2.offset)
+                if dt1.base.buf[o1+2:o1+1+s1] != dt2.base.buf[o2+2:o2+1+s2]
+                    return UnificationFailure(Val(:difference), dt1, dt2)
+                end
+            elseif tag1 isa ExprArity
+                if tag1.arity != tag2.arity
+                    return UnificationFailure(Val(:difference), dt1, dt2)
+                end
+                # push child pairs
+                children1 = ExprEnv[]; ee_args!(dt1, children1)
+                children2 = ExprEnv[]; ee_args!(dt2, children2)
+                for i in length(children1):-1:1
+                    push!(stack, (children1[i], children2[i]))
+                end
+            end
+            # NewVar/VarRef pairs handled below; symbol/arity matched above
+        elseif vx !== nothing
+            vx == vy && continue   # same var — skip
+            _occurs_check(vx, dt2) && return UnificationFailure(Val(:occurs), vx, dt2)
+            bindings[vx] = dt2
+        else  # vy !== nothing
+            vy == vx && continue
+            _occurs_check(vy, dt1) && return UnificationFailure(Val(:occurs), vy, dt1)
+            bindings[vy] = dt1
+        end
+    end
+
+    bindings
+end
+
+# =====================================================================
+# expr_apply — substitution (ports apply in mork_expr)
+# =====================================================================
+
+const APPLY_DEPTH = 64
+
+"""
+    expr_apply(n, original_intros, new_intros, ez, bindings, oz, cycled, stack, assignments)
+          → (original_intros, new_intros)
+
+Apply variable bindings to the expression at `ez`, writing the result to `oz`.
+Mirrors `apply` in mork_expr.
+"""
+function expr_apply(n::UInt8, original_intros::UInt8, new_intros::UInt8,
+                    ez::ExprZipper,
+                    bindings::Dict{ExprVar, ExprEnv},
+                    oz::ExprZipper,
+                    cycled::Dict{ExprVar, UInt8},
+                    stack::Vector{ExprVar},
+                    assignments::Vector{ExprVar}) :: Tuple{UInt8, UInt8}
+
+    length(stack) > APPLY_DEPTH && error("expr_apply depth > $APPLY_DEPTH: n=$n")
+
+    while true
+        b = ez.root.buf[ez.loc]
+        tag = byte_item(b)
+
+        if tag isa ExprNewVar
+            key = (n, original_intros)
+            bound = get(bindings, key, nothing)
+            if bound === nothing
+                # not in bindings — check assignments for existing intro
+                pos = findfirst(==(key), assignments)
+                if pos !== nothing
+                    ez_write_var_ref!(oz, UInt8(pos - 1))
+                else
+                    ez_write_new_var!(oz)
+                    new_intros += UInt8(1)
+                    push!(assignments, key)
+                end
+                oz.loc += 1
+                original_intros += UInt8(1)
+            else
+                # bound — check for cycles
+                if haskey(cycled, key)
+                    ez_write_var_ref!(oz, cycled[key])
+                    oz.loc += 1
+                elseif key in stack
+                    cycled[key] = new_intros
+                    ez_write_new_var!(oz)
+                    oz.loc += 1
+                    new_intros += UInt8(1)
+                else
+                    push!(stack, key)
+                    sub_ez = ExprZipper(MORK.Expr(bound.base.buf), Int(bound.offset) + 1)
+                    _, new_intros = expr_apply(bound.n, bound.v, new_intros, sub_ez, bindings, oz, cycled, stack, assignments)
+                    pop!(stack)
+                end
+                original_intros += UInt8(1)
+            end
+
+        elseif tag isa ExprVarRef
+            idx = tag.idx
+            key = (n, idx)
+            bound = get(bindings, key, nothing)
+            if bound === nothing
+                pos = findfirst(==(key), assignments)
+                if pos !== nothing
+                    ez_write_var_ref!(oz, UInt8(pos - 1))
+                else
+                    ez_write_new_var!(oz)
+                    new_intros += UInt8(1)
+                    push!(assignments, key)
+                end
+                oz.loc += 1
+            else
+                if haskey(cycled, key)
+                    ez_write_var_ref!(oz, cycled[key])
+                    oz.loc += 1
+                elseif key in stack
+                    cycled[key] = new_intros
+                    ez_write_new_var!(oz)
+                    oz.loc += 1
+                    new_intros += UInt8(1)
+                else
+                    push!(stack, key)
+                    sub_ez = ExprZipper(MORK.Expr(bound.base.buf), Int(bound.offset) + 1)
+                    _, new_intros = expr_apply(bound.n, bound.v, new_intros, sub_ez, bindings, oz, cycled, stack, assignments)
+                    pop!(stack)
+                end
+            end
+
+        elseif tag isa ExprSymbol
+            n_sym = Int(tag.size)
+            sym_bytes = view(ez.root.buf, ez.loc+1 : ez.loc+n_sym)
+            ez_write_symbol!(oz, sym_bytes)
+            ez.loc += 1 + n_sym
+            oz.loc  # already advanced by ez_write_symbol!
+            # continue (don't call ez_next! here — we advanced manually)
+            _check = ez.loc <= length(ez.root)
+            _check || return (original_intros, new_intros)
+            continue
+
+        elseif tag isa ExprArity
+            ez_write_arity!(oz, tag.arity)
+            oz.loc += 1   # skip past the arity we just wrote (ez_write_arity! already advanced)
+            ez.loc += 1
+        end
+
+        ez.loc <= length(ez.root) || return (original_intros, new_intros)
+        # advance to next byte
+        # (symbol advances manually above; other tags advance in the conditionals)
+        if !(tag isa ExprSymbol)
+            ez.loc <= length(ez.root) || return (original_intros, new_intros)
+        end
+    end
+end
+
+# Convenience wrapper
+function expr_apply(ez::ExprZipper, bindings::Dict{ExprVar, ExprEnv}, oz::ExprZipper)
+    expr_apply(UInt8(0), UInt8(0), UInt8(0), ez, bindings, oz,
+               Dict{ExprVar, UInt8}(), ExprVar[], ExprVar[])
+end
+
+# =====================================================================
+# ee_show — debug string for ExprEnv
+# =====================================================================
+
+"""Show the expression in ExprEnv with variable labels like <n,idx>."""
+function ee_show(ee::ExprEnv) :: String
+    io = IOBuffer()
+    _ee_show_impl(io, ee.base, Int(ee.offset), Int(ee.v), Int(ee.n))
+    String(take!(io))
+end
+
+function _ee_show_impl(io::IO, x::MORK.Expr, off::Int, var_cnt::Int, n::Int) :: Int
+    b = x.buf[off + 1]
+    tag = byte_item(b)
+    if tag isa ExprNewVar
+        print(io, "<$(n),$(var_cnt)>")
+        return var_cnt + 1
+    elseif tag isa ExprVarRef
+        print(io, "<$(n),$(Int(tag.idx))>")
+        return var_cnt
+    elseif tag isa ExprSymbol
+        s = Int(tag.size)
+        write(io, x.buf[off+2 : off+1+s])
+        return var_cnt
+    elseif tag isa ExprArity
+        a = Int(tag.arity)
+        print(io, "(")
+        off2 = off + 1
+        for i in 1:a
+            i > 1 && print(io, " ")
+            var_cnt = _ee_show_impl(io, x, off2, var_cnt, n)
+            # advance off2 by the span of the child
+            (_, _, j_end) = expr_traverseh(
+                0, x, off2,
+                (h,o) -> h, (h,o,r) -> h, (h,o,sl) -> h,
+                (h,o,a2) -> h, (h,o,x2,y) -> h, (h,o,acc) -> acc)
+            off2 = j_end
+        end
+        print(io, ")")
+        return var_cnt
+    end
+    var_cnt
+end
+
+# =====================================================================
+# Exports
+# =====================================================================
+
+export expr_traverseh, ee_args!
+export UnificationFailureKind, UNIF_OCCURS, UNIF_DIFFERENCE, UNIF_MAX_ITER
+export UnificationFailure, expr_unify
+export expr_apply, ee_show

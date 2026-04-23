@@ -120,6 +120,10 @@ include("Counters.jl")
 # Ports mork/expr/src/lib.rs.
 include("expr/Expr.jl")
 
+# Expression algorithms: traverseh, ee_args!, unify, apply.
+# Ports the algorithmic half of mork/expr/src/lib.rs.
+include("expr/ExprAlg.jl")
+
 # Symbol interning: 128-bucket PathMap-backed symbol table.
 # Ports mork/interning/src/lib.rs + handle.rs + symbol_backing.rs.
 include("interning/Interning.jl")

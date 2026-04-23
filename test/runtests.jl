@@ -3627,4 +3627,97 @@ using MORK
             @test occursin("hello", out)
         end
     end
+
+    @testset "ExprAlg (traverseh + unify)" begin
+        @testset "expr_traverseh — symbol counting" begin
+            buf = UInt8[0xC3, UInt8('f'), UInt8('o'), UInt8('o')]
+            e   = MORK.Expr(buf)
+            (sym_count, _, _) = expr_traverseh(0, e, 0,
+                (h,o)    -> (h, nothing),
+                (h,o,r)  -> (h, nothing),
+                (h,o,sl) -> (h + 1, nothing),    # count symbols via value
+                (h,o,a)  -> (h, 0),
+                (h,o,x,y)-> (h, x + (y===nothing ? 0 : y)),
+                (h,o,acc)-> (h, acc))
+            # sym_count here is h_final (not updated in this config), use value instead
+            (_, v, _) = expr_traverseh(0, e, 0,
+                (h,o)    -> (h, 0),
+                (h,o,r)  -> (h, 0),
+                (h,o,sl) -> (h, 1),
+                (h,o,a)  -> (h, 0),
+                (h,o,x,y)-> (h, x + y),
+                (h,o,acc)-> (h, acc))
+            @test v == 1
+        end
+
+        @testset "expr_traverseh — arity node" begin
+            buf = UInt8[0x02,
+                        0xC3, UInt8('f'), UInt8('o'), UInt8('o'),
+                        0xC3, UInt8('b'), UInt8('a'), UInt8('r')]
+            e   = MORK.Expr(buf)
+            (_, v, _) = expr_traverseh(0, e, 0,
+                (h,o)    -> (h, 0),
+                (h,o,r)  -> (h, 0),
+                (h,o,sl) -> (h, 1),
+                (h,o,a)  -> (h, 0),
+                (h,o,x,y)-> (h, x + y),
+                (h,o,acc)-> (h, acc))
+            @test v == 2
+        end
+
+        @testset "expr_traverseh — new_var counting via h" begin
+            buf = UInt8[0x02, 0xC0, 0xC0]   # arity-2 ($ $)
+            e   = MORK.Expr(buf)
+            (h_final, _, _) = expr_traverseh(0, e, 0,
+                (h,o)    -> (h + 1, nothing),    # new_var: increment h
+                (h,o,r)  -> (h, nothing),
+                (h,o,sl) -> (h, nothing),
+                (h,o,a)  -> (h, nothing),
+                (h,o,x,y)-> (h, nothing),
+                (h,o,acc)-> (h, acc))
+            @test h_final == 2
+        end
+
+        @testset "ee_args! — compound" begin
+            e   = MORK.Expr(UInt8[0x02, 0xC3, UInt8('a'), UInt8('b'), UInt8('c'),
+                                        0xC3, UInt8('d'), UInt8('e'), UInt8('f')])
+            ee  = ExprEnv(0, e)
+            kids = ExprEnv[]
+            ee_args!(ee, kids)
+            @test length(kids) == 2
+        end
+
+        @testset "ee_args! — atom (no children)" begin
+            e   = MORK.Expr(UInt8[0xC3, UInt8('f'), UInt8('o'), UInt8('o')])
+            ee  = ExprEnv(0, e)
+            kids = ExprEnv[]
+            ee_args!(ee, kids)
+            @test isempty(kids)
+        end
+
+        @testset "expr_unify — trivial (same symbol)" begin
+            e1 = MORK.Expr(UInt8[0xC3, UInt8('f'), UInt8('o'), UInt8('o')])
+            e2 = MORK.Expr(UInt8[0xC3, UInt8('f'), UInt8('o'), UInt8('o')])
+            result = expr_unify([(ExprEnv(0, e1), ExprEnv(1, e2))])
+            @test result isa Dict
+            @test isempty(result)
+        end
+
+        @testset "expr_unify — variable binds to symbol" begin
+            # $x vs foo  →  x→foo
+            e1 = MORK.Expr(UInt8[0xC0])                              # $x
+            e2 = MORK.Expr(UInt8[0xC3, UInt8('f'), UInt8('o'), UInt8('o')])  # foo
+            result = expr_unify([(ExprEnv(0, e1), ExprEnv(1, e2))])
+            @test result isa Dict
+            @test length(result) == 1
+        end
+
+        @testset "expr_unify — symbol mismatch fails" begin
+            e1 = MORK.Expr(UInt8[0xC3, UInt8('f'), UInt8('o'), UInt8('o')])
+            e2 = MORK.Expr(UInt8[0xC3, UInt8('b'), UInt8('a'), UInt8('r')])
+            result = expr_unify([(ExprEnv(0, e1), ExprEnv(1, e2))])
+            @test result isa UnificationFailure
+            @test result.kind == MORK.UNIF_DIFFERENCE
+        end
+    end
 end
