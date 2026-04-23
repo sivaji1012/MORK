@@ -2787,6 +2787,57 @@ using MORK
             zt_release!(t)
         end
 
+        @testset "PrefixZipper (ports prefix_zipper.rs)" begin
+
+            @testset "prefix prepended to path space" begin
+                m = PathMap{Int}()
+                set_val_at!(m, collect(UInt8,"A"), 1)
+                set_val_at!(m, collect(UInt8,"B"), 2)
+                pz = PrefixZipper(collect(UInt8,"prefix."), read_zipper(m))
+                # At root: child is 'p' (first byte of prefix)
+                @test pz_child_count(pz) == 1
+                @test test_bit(pz_child_mask(pz), UInt8('p'))
+            end
+
+            @testset "descend through prefix reaches source" begin
+                m = PathMap{Int}()
+                set_val_at!(m, collect(UInt8,"X"), 10)
+                pz = PrefixZipper(collect(UInt8,"pre."), read_zipper(m))
+                pz_descend_to!(pz, collect(UInt8,"pre.X"))
+                @test pz_path_exists(pz)
+                @test pz_is_val(pz)
+            end
+
+            @testset "off-prefix path does not exist" begin
+                m = PathMap{Int}()
+                set_val_at!(m, collect(UInt8,"A"), 1)
+                pz = PrefixZipper(collect(UInt8,"pre."), read_zipper(m))
+                pz_descend_to!(pz, collect(UInt8,"wrong.A"))
+                @test !pz_path_exists(pz)
+            end
+
+            @testset "ascend restores position" begin
+                m = PathMap{Int}()
+                set_val_at!(m, collect(UInt8,"Y"), 99)
+                pz = PrefixZipper(collect(UInt8,"pre."), read_zipper(m))
+                pz_descend_to!(pz, collect(UInt8,"pre.Y"))
+                @test pz_is_val(pz)
+                pz_ascend!(pz, 6)  # ascend 6 bytes back through prefix
+                @test isempty(pz_path(pz))
+            end
+
+            @testset "reset restores to root" begin
+                m = PathMap{Int}()
+                set_val_at!(m, collect(UInt8,"Z"), 5)
+                pz = PrefixZipper(collect(UInt8,"p."), read_zipper(m))
+                pz_descend_to!(pz, collect(UInt8,"p.Z"))
+                pz_reset!(pz)
+                @test isempty(pz_path(pz))
+                @test pz_child_count(pz) == 1
+            end
+
+        end
+
         @testset "OverlayZipper (ports overlay_zipper.rs)" begin
 
             @testset "union of disjoint maps" begin

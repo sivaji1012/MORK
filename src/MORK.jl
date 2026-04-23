@@ -81,6 +81,10 @@ include("ZipperHead.jl")
 # Ports pathmap/src/overlay_zipper.rs.
 include("OverlayZipper.jl")
 
+# PrefixZipper — prepends a prefix to a source zipper's path space.
+# Ports pathmap/src/prefix_zipper.rs.
+include("PrefixZipper.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """
