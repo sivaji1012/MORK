@@ -85,6 +85,10 @@ include("OverlayZipper.jl")
 # Ports pathmap/src/prefix_zipper.rs.
 include("PrefixZipper.jl")
 
+# ProductZipper — Cartesian-product virtual trie over N factor zippers.
+# Ports pathmap/src/product_zipper.rs.
+include("ProductZipper.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """

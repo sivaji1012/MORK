@@ -253,6 +253,56 @@ function _ascend_across_nodes!(z::ReadZipperCore)
     end
 end
 
+# =====================================================================
+# Internal ReadZipperCore helpers used by ProductZipper
+# =====================================================================
+
+"""
+    _zc_regularize!(z)
+If focus has a child at node_key, push current focus into ancestors
+and set focus_node to the child. No-op if already regularized.
+Mirrors `ReadZipperCore::regularize` (zipper.rs:2254).
+"""
+function _zc_regularize!(z::ReadZipperCore{V,A}) where {V,A}
+    key = collect(_znode_key(z))
+    isempty(key) && return
+    result = node_get_child(_zfnode(z), key)
+    result === nothing && return
+    consumed, next_rc = result
+    push!(z.ancestors, (z.focus_node, z.focus_iter_token, length(z.prefix_buf)))
+    z.focus_node       = _rc_inner(next_rc)
+    z.focus_iter_token = NODE_ITER_INVALID
+end
+
+"""
+    _zc_deregularize!(z)
+If at a node boundary (empty node_key), pop one ancestor.
+Mirrors `ReadZipperCore::deregularize` (zipper.rs:2269).
+"""
+function _zc_deregularize!(z::ReadZipperCore)
+    if length(z.prefix_buf) == _znode_key_start(z)
+        _ascend_across_nodes!(z)
+    end
+end
+
+"""
+    _zc_push_node!(z, node_inner)
+Push a raw inner node onto the ancestor stack, making it the new focus.
+Mirrors `ReadZipperCore::push_node` (zipper.rs:2752).
+"""
+function _zc_push_node!(z::ReadZipperCore{V,A},
+                         node_inner::Union{Nothing, AbstractTrieNode{V,A}}) where {V,A}
+    push!(z.ancestors, (z.focus_node, z.focus_iter_token, length(z.prefix_buf)))
+    z.focus_node       = node_inner
+    z.focus_iter_token = NODE_ITER_INVALID
+end
+
+"""
+    _zc_node_key(z) → view
+Return the current node_key slice. Mirrors `ReadZipperCore::node_key`.
+"""
+@inline _zc_node_key(z::ReadZipperCore) = _znode_key(z)
+
 # ascend within node: trim prefix_buf to just past the prior branch key
 function _ascend_within_node!(z::ReadZipperCore{V,A}) where {V,A}
     branch_key = prior_branch_key(_zfnode(z), _znode_key(z))
@@ -1002,5 +1052,6 @@ export zipper_descend_first_k_path!, zipper_to_next_k_path!
 export zipper_fork!
 export rz_path_exists, rz_is_val, rz_get_val, rz_path, rz_child_count, rz_child_mask
 export rz_val_count, rz_to_next_val!, rz_descend_to!, rz_ascend!, rz_reset!, rz_fork!
+export _zc_regularize!, _zc_deregularize!, _zc_push_node!, _zc_node_key
 export PathMap, _ensure_root!, read_zipper, read_zipper_at_path, get_val_at, path_exists_at, val_count
 export pjoin, pmeet, psubtract, prestrict

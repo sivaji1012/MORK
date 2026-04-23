@@ -2787,6 +2787,55 @@ using MORK
             zt_release!(t)
         end
 
+        @testset "ProductZipper (ports product_zipper.rs)" begin
+
+            @testset "single-factor is equivalent to read_zipper" begin
+                m = PathMap{Int}()
+                set_val_at!(m, collect(UInt8,"a"), 1)
+                set_val_at!(m, collect(UInt8,"b"), 2)
+                pz = ProductZipper(read_zipper(m))
+                @test pz_factor_count(pz) == 1
+                vals = Int[]
+                while pz_to_next_val!(pz); push!(vals, pz_val(pz)); end
+                @test sort(vals) == [1, 2]
+            end
+
+            @testset "2-factor product: paths include junction + leaf vals" begin
+                a = PathMap{Int}()
+                set_val_at!(a, collect(UInt8,"x"), 0)
+                set_val_at!(a, collect(UInt8,"y"), 0)
+                b = PathMap{Int}()
+                set_val_at!(b, collect(UInt8,"1"), 1)
+                set_val_at!(b, collect(UInt8,"2"), 2)
+
+                pz = ProductZipper(read_zipper(a), [read_zipper(b)])
+                @test pz_factor_count(pz) == 2
+
+                # Primary vals ("x","y") are junction vals; product yields 6 total:
+                # "x", "x1", "x2", "y", "y1", "y2"
+                paths = Vector{UInt8}[]
+                while pz_to_next_val!(pz)
+                    push!(paths, collect(pz_path(pz)))
+                end
+                @test length(paths) == 6
+                expected = [collect(UInt8, s) for s in ["x","x1","x2","y","y1","y2"]]
+                @test sort(paths) == sort(expected)
+            end
+
+            @testset "pz_reset! returns to root" begin
+                a = PathMap{Int}()
+                set_val_at!(a, collect(UInt8,"k"), 1)
+                b = PathMap{Int}()
+                set_val_at!(b, collect(UInt8,"v"), 2)
+                pz = ProductZipper(read_zipper(a), [read_zipper(b)])
+                pz_to_next_val!(pz)
+                @test !isempty(pz_path(pz))
+                pz_reset!(pz)
+                @test isempty(pz_path(pz))
+            end
+
+        end
+
         @testset "PrefixZipper (ports prefix_zipper.rs)" begin
 
             @testset "prefix prepended to path space" begin
