@@ -321,6 +321,108 @@ Base.:(==)(a::OwnedSourceItem, b::OwnedSourceItem) = a.bytes == b.bytes
 Base.hash(a::OwnedSourceItem, h::UInt) = hash(a.bytes, h)
 
 # =====================================================================
+# ExtractFailure — expression extraction error enum
+# =====================================================================
+
+"""
+    ExtractFailure
+
+Reasons an expression extraction (pattern match / destructure) can fail.
+Mirrors `ExtractFailure` in mork_expr.
+"""
+@enum ExtractFailureKind begin
+    EF_INTRODUCED_VAR
+    EF_RECURRENT_VAR
+    EF_REF_MISMATCH
+    EF_REF_SYMBOL_EARLY_MISMATCH
+    EF_REF_SYMBOL_MISMATCH
+    EF_REF_TYPE_MISMATCH
+    EF_REF_EXPR_EARLY_MISMATCH
+    EF_REF_EXPR_MISMATCH
+    EF_EXPR_EARLY_MISMATCH
+    EF_SYMBOL_EARLY_MISMATCH
+    EF_SYMBOL_MISMATCH
+    EF_TYPE_MISMATCH
+end
+
+struct ExtractFailure
+    kind ::ExtractFailureKind
+    a    ::UInt8
+    b    ::UInt8
+    sym_a::Vector{UInt8}
+    sym_b::Vector{UInt8}
+    tag_a::Union{Nothing, ExprTag}
+    tag_b::Union{Nothing, ExprTag}
+end
+
+ExtractFailure(k::ExtractFailureKind) =
+    ExtractFailure(k, 0x00, 0x00, UInt8[], UInt8[], nothing, nothing)
+ExtractFailure(k::ExtractFailureKind, a::UInt8) =
+    ExtractFailure(k, a, 0x00, UInt8[], UInt8[], nothing, nothing)
+ExtractFailure(k::ExtractFailureKind, a::UInt8, b::UInt8) =
+    ExtractFailure(k, a, b, UInt8[], UInt8[], nothing, nothing)
+
+# =====================================================================
+# expr_parse_str — compile-time-style string → Expr bytes
+# =====================================================================
+
+"""
+    expr_parse_str(s) → Expr
+
+Parse a text-format expression string (e.g. `"[2] foo \$"`) into flat byte
+encoding.  Mirrors `mork_expr::parse::<N>` const fn (the compile-time parser).
+
+Syntax:
+  - `[N]`  → Arity(N)
+  - `\$`   → NewVar
+  - `_N`   → VarRef(N-1)
+  - `word` → Symbol(word)
+"""
+function expr_parse_str(s::AbstractString) :: MORK.Expr
+    out = UInt8[]
+    i   = 1
+    n   = length(s)
+    while i <= n
+        # skip spaces
+        while i <= n && s[i] == ' '; i += 1; end
+        i > n && break
+        c = s[i]
+        if c == '['
+            i += 1
+            num = UInt8(0)
+            while i <= n && isdigit(s[i])
+                num = num * 10 + UInt8(s[i] - '0')
+                i += 1
+            end
+            i <= n && s[i] == ']' && (i += 1)
+            push!(out, item_byte(ExprArity(num)))
+        elseif c == '$'
+            i += 1
+            push!(out, item_byte(ExprNewVar()))
+        elseif c == '_'
+            i += 1
+            num = UInt8(0)
+            while i <= n && isdigit(s[i])
+                num = num * 10 + UInt8(s[i] - '0')
+                i += 1
+            end
+            push!(out, item_byte(ExprVarRef(num > 0 ? num - UInt8(1) : UInt8(0))))
+        else
+            # symbol: read until space
+            start = i
+            while i <= n && s[i] != ' '
+                i += 1
+            end
+            sym_bytes = Vector{UInt8}(s[start:i-1])
+            n_sym = UInt8(length(sym_bytes))
+            push!(out, item_byte(ExprSymbol(n_sym)))
+            append!(out, sym_bytes)
+        end
+    end
+    MORK.Expr(out)
+end
+
+# =====================================================================
 # Exports
 # =====================================================================
 
@@ -332,3 +434,8 @@ export ez_ensure!, ez_write_new_var!, ez_write_var_ref!, ez_write_arity!
 export ez_patch_arity!, ez_write_symbol!, ez_write_move!, ez_finish_span
 export ExprEnv, ExprVar, ee_subsexpr, ee_var_opt, ee_offset
 export OwnedSourceItem
+export ExtractFailureKind, EF_INTRODUCED_VAR, EF_RECURRENT_VAR, EF_REF_MISMATCH
+export EF_REF_SYMBOL_EARLY_MISMATCH, EF_REF_SYMBOL_MISMATCH, EF_REF_TYPE_MISMATCH
+export EF_REF_EXPR_EARLY_MISMATCH, EF_REF_EXPR_MISMATCH, EF_EXPR_EARLY_MISMATCH
+export EF_SYMBOL_EARLY_MISMATCH, EF_SYMBOL_MISMATCH, EF_TYPE_MISMATCH
+export ExtractFailure, expr_parse_str
