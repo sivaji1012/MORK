@@ -397,9 +397,14 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr,
     ee_args!(ee_tpl, tpl_args)
     templates = [ee.base.buf[Int(ee.offset)+1 : end] for ee in tpl_args[2:end]]
 
-    # Insert add_expr unconditionally
-    add_bytes = collect(add_expr.buf)
-    set_val_at!(s.btm, add_bytes, UNIT_VAL)
+    # In upstream Rust: add_expr is inserted into read_copy (a clone of btm used
+    # for querying only), NOT into btm itself. Writing it to btm would re-trigger
+    # metta_calculus on the next step, creating an infinite firing loop.
+    # Our simplified version skips the clone step and queries s.btm directly,
+    # so we must NOT re-insert add_expr. The exec rule is already consumed
+    # (removed) by space_metta_calculus! before interpret is called.
+    # Uncommenting the line below would reproduce the infinite-loop bug:
+    # set_val_at!(s.btm, collect(add_expr.buf), UNIT_VAL)
 
     any_new  = Ref(false)
     touched  = space_query_multi(s.btm, pat_expr, (bindings, loc_expr) -> begin
@@ -454,11 +459,12 @@ function space_interpret!(s::Space, rt::MORK.Expr) :: Bool
     ee_rt = ExprEnv(UInt8(0), UInt8(0), UInt32(0), rt)
     args  = ExprEnv[]
     ee_args!(ee_rt, args)
-    length(args) < 3 && return false
+    # args layout: [1]=functor "exec", [2]=loc, [3]=pat_expr, [4]=tpl_expr
+    length(args) < 4 && return false
 
-    # args[1]=loc (ignored), args[2]=pat_expr, args[3]=tpl_expr
-    pat_ee = args[2]
-    tpl_ee = args[3]
+    # args[2]=loc (ignored), args[3]=pat_expr, args[4]=tpl_expr
+    pat_ee = args[3]
+    tpl_ee = args[4]
 
     # Validate pat_expr shape: must be Arity node with `,` or `I` functor
     pat_buf = pat_ee.base.buf

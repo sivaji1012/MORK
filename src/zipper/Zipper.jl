@@ -598,29 +598,18 @@ function _to_next_get_val!(z::ReadZipperCore{V,A}) where {V,A}
 end
 
 """
-Structural DFS to next value.  Uses `zipper_is_val` (flag-based) instead of
-checking the returned value, which fails for `PathMap{Nothing}` where the
-value IS `nothing` and is indistinguishable from "no value" by comparison.
+Advance to the next stored value using the token-based iterator.
+Works correctly for `PathMap{UnitVal}` because `UnitVal()` is non-nothing,
+so `value !== nothing` correctly signals a found value.
+
+The previous DFS approach (`zipper_is_val`-based) was introduced to fix
+`PathMap{Nothing}` where both "value stored" and "no value" returned
+`nothing`, but caused an infinite loop for multi-value tries.
+The correct fix for the nothing-ambiguity was to change the value type
+to `UnitVal` (done in the PathMap{Nothing}→PathMap{UnitVal} migration),
+making the token-based approach correct again.
 """
-function zipper_to_next_val!(z::ReadZipperCore)
-    while true
-        if zipper_descend_first_byte!(z)
-            zipper_is_val(z) && return true
-            if zipper_descend_until!(z); zipper_is_val(z) && return true; end
-        else
-            ascending = true
-            while ascending
-                if zipper_to_next_sibling_byte!(z)
-                    zipper_is_val(z) && return true
-                    ascending = false
-                else
-                    zipper_ascend_byte!(z) || return false
-                    zipper_at_root(z)      && return false
-                end
-            end
-        end
-    end
-end
+zipper_to_next_val!(z::ReadZipperCore) = _to_next_get_val!(z) !== nothing
 
 # =====================================================================
 # ZipperMoving remaining defaults (zipper.rs trait defaults)
