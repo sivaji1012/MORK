@@ -157,6 +157,10 @@ include("kernel/Sinks.jl")
 # Ports mork/kernel/src/space.rs (core subset; Z3/mmap/coroutine paths stubbed).
 include("kernel/Space.jl")
 
+# Kernel: top-level CLI commands (run/convert).
+# Ports the Commands::Run + Commands::Convert branches of main.rs.
+include("kernel/Main.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """
