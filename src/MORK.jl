@@ -89,6 +89,10 @@ include("PrefixZipper.jl")
 # Ports pathmap/src/product_zipper.rs.
 include("ProductZipper.jl")
 
+# Morphisms — catamorphism/anamorphism fold machinery over tries.
+# Ports pathmap/src/morphisms.rs.
+include("Morphisms.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """

@@ -2787,6 +2787,69 @@ using MORK
             zt_release!(t)
         end
 
+        @testset "Morphisms — catamorphism (ports morphisms.rs)" begin
+
+            @testset "cata_side_effect counts values (leaf fold)" begin
+                m = PathMap{Int}()
+                set_val_at!(m, collect(UInt8,"a"), 1)
+                set_val_at!(m, collect(UInt8,"b"), 2)
+                set_val_at!(m, collect(UInt8,"ba"), 3)
+                # fold: sum all values in the trie
+                total = cata_side_effect(m, (mask, children, val, path) -> begin
+                    s = sum(children; init=0)
+                    val !== nothing ? s + val : s
+                end)
+                @test total == 6
+            end
+
+            @testset "cata_cached same result as side_effect" begin
+                m = PathMap{Int}()
+                set_val_at!(m, collect(UInt8,"x"), 10)
+                set_val_at!(m, collect(UInt8,"y"), 20)
+                count_se = cata_side_effect(m, (mask, ch, val, path) ->
+                    sum(ch; init=0) + (val !== nothing ? 1 : 0))
+                count_ca = cata_cached(m, (mask, ch, val) ->
+                    sum(ch; init=0) + (val !== nothing ? 1 : 0))
+                @test count_se == count_ca == 2
+            end
+
+            @testset "cata_jumping_cached returns correct value count" begin
+                m = PathMap{Int}()
+                for i in 1:5
+                    set_val_at!(m, [UInt8(i)], i)
+                end
+                # Count leaves
+                count = cata_jumping_cached(m, (mask, ch, val, sub_path) ->
+                    sum(ch; init=0) + (val !== nothing ? 1 : 0))
+                @test count == 5
+            end
+
+            @testset "cata_jumping_side_effect provides jump_len" begin
+                m = PathMap{Int}()
+                set_val_at!(m, collect(UInt8,"abc"), 1)
+                set_val_at!(m, collect(UInt8,"abd"), 2)
+                # With jumping, alg sees "abc"/"abd" with a jump over common prefix
+                jumps = Int[]
+                cata_jumping_side_effect(m, (mask, ch, jump, val, path) -> begin
+                    push!(jumps, jump)
+                    sum(ch; init=0) + (val !== nothing ? 1 : 0)
+                end)
+                # Some steps should have jump > 0 (the "ab" common prefix is jumped)
+                @test any(j -> j > 0, jumps)
+            end
+
+            @testset "map_hash consistent" begin
+                m1 = PathMap{Int}()
+                set_val_at!(m1, collect(UInt8,"a"), 1)
+                m2 = PathMap{Int}()
+                set_val_at!(m2, collect(UInt8,"a"), 1)
+                @test map_hash(m1) == map_hash(m2)
+                set_val_at!(m2, collect(UInt8,"b"), 2)
+                @test map_hash(m1) != map_hash(m2)
+            end
+
+        end
+
         @testset "ProductZipper (ports product_zipper.rs)" begin
 
             @testset "single-factor is equivalent to read_zipper" begin
