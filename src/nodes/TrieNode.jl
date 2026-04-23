@@ -927,7 +927,7 @@ end
 
 export MAX_NODE_KEY_BYTES, NODE_ITER_INVALID, NODE_ITER_FINISHED
 export EMPTY_NODE_TAG, DENSE_BYTE_NODE_TAG, LINE_LIST_NODE_TAG
-export CELL_BYTE_NODE_TAG, TINY_REF_NODE_TAG
+export CELL_BYTE_NODE_TAG, TINY_REF_NODE_TAG, BRIDGE_NODE_TAG
 
 export AbstractTrieNode
 export node_key_overlap, node_contains_partial_key

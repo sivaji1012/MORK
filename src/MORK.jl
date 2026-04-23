@@ -56,6 +56,7 @@ include("nodes/TinyRefNode.jl")
 # 256-slot bitmap-indexed node (DenseByteNode + CellByteNode + CoFreeEntry).
 # Ports pathmap/src/dense_byte_node.rs.
 include("nodes/DenseByteNode.jl")
+include("nodes/BridgeNode.jl")
 
 # Read zipper (cursor) + PathMap container.
 # Ports pathmap/src/zipper.rs (read-only surface) + pathmap/src/trie_map.rs.

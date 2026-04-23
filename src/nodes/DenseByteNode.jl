@@ -1561,6 +1561,29 @@ end
 # Exports
 # =====================================================================
 
+"""
+    node_add_payload!(n::DenseByteNode, key, is_child, payload)
+
+Add a (key, payload) entry to a DenseByteNode.  For keys > 1 byte, a
+BridgeNode child is created to hold the remaining suffix.
+Mirrors `DenseByteNode::add_payload` in dense_byte_node.rs.
+"""
+function node_add_payload!(n::DenseByteNode{V,A}, key::AbstractVector{UInt8},
+                            is_child::Bool, payload::ValOrChild{V,A}) where {V,A}
+    @assert !isempty(key)
+    if length(key) > 1
+        child_node = BridgeNode(key[2:end], is_child, payload, n.alloc)
+        _bn_set_child!(n, key[1], TrieNodeODRc(child_node, n.alloc))
+    else
+        if is_child
+            _bn_set_child!(n, key[1], into_child(payload))
+        else
+            _bn_set_val!(n, key[1], into_val(payload))
+        end
+    end
+end
+
 export CoFreeEntry, has_rec, has_val
 export AbstractByteNode, DenseByteNode, CellByteNode
 export merge_from_list_node!, bit_sibling, val_count_below_node
+export node_add_payload!

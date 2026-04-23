@@ -1452,6 +1452,66 @@ using MORK
         end
     end
 
+    @testset "BridgeNode (ports bridge_node.rs)" begin
+        V = Int; A = GlobalAlloc; alloc = GlobalAlloc()
+
+        @testset "BridgeNode — short key val round-trip" begin
+            n = BridgeNode{V,A}(alloc)
+            @test node_is_empty(n)
+            r = node_set_val!(n, collect(UInt8,"abc"), 42)
+            @test !node_is_empty(n)
+            @test node_contains_val(n, collect(UInt8,"abc"))
+            @test node_get_val(n, collect(UInt8,"abc")) == 42
+            @test node_get_val(n, collect(UInt8,"xy"))  === nothing
+        end
+
+        @testset "BridgeNode — short key child round-trip" begin
+            child = LineListNode{V,A}(alloc)
+            child_rc = TrieNodeODRc(child, alloc)
+            n = BridgeNode{V,A}(alloc)
+            node_set_branch!(n, collect(UInt8,"a"), child_rc)
+            r = node_get_child(n, collect(UInt8,"a"))
+            @test r !== nothing
+            consumed, rc = r
+            @test consumed == 1
+        end
+
+        @testset "BridgeNode — long key chains BridgeNodes" begin
+            long_key = collect(UInt8, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcde")
+            @test length(long_key) == 31   # BRIDGE_KEY_MAX
+            n = BridgeNode(long_key, false, ValOrChild(99), alloc)
+            @test n.key == long_key
+            @test node_get_val(n, long_key) == 99
+
+            # key > 31 bytes chains
+            longer = vcat(long_key, UInt8[0x66, 0x67])  # 33 bytes
+            n2 = BridgeNode(longer, false, ValOrChild(7), alloc)
+            @test length(n2.key) == BRIDGE_KEY_MAX
+            @test n2.is_child   # first node points to child
+            r = node_get_child(n2, longer[1:BRIDGE_KEY_MAX])
+            @test r !== nothing
+        end
+
+        @testset "BridgeNode — remove val" begin
+            n = BridgeNode{V,A}(alloc)
+            node_set_val!(n, collect(UInt8,"k"), 5)
+            old = node_remove_val!(n, collect(UInt8,"k"), false)
+            @test old == 5
+            @test node_is_empty(n)
+        end
+
+        @testset "BridgeNode — node_add_payload! on DenseByteNode" begin
+            d = DenseByteNode{V,A}(alloc)
+            node_add_payload!(d, collect(UInt8,"ax"), false, ValOrChild(1))
+            node_add_payload!(d, collect(UInt8,"by"), false, ValOrChild(2))
+            @test node_get_val(d, collect(UInt8,"a")) === nothing  # 'a' is a child prefix
+            # Navigate: child at 'a' → val at 'x'
+            res = node_get_child(d, UInt8[UInt8('a')])
+            @test res !== nothing
+        end
+
+    end
+
     @testset "DenseByteNode (ports pathmap/src/dense_byte_node.rs)" begin
         alloc = GlobalAlloc()
 
