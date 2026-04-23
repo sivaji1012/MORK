@@ -2889,6 +2889,62 @@ using MORK
             zt_release!(t)
         end
 
+        @testset "DependentZipper (ports dependent_zipper.rs)" begin
+
+            @testset "dep_test_1: appended .postfix to each path" begin
+                m = PathMap{Int}()
+                words = ["arrow","bow","cannon","roman","romane","romanus","romulus"]
+                for (i,w) in enumerate(words); set_val_at!(m, collect(UInt8,w), i); end
+
+                postfix_m = PathMap{Int}()
+                set_val_at!(postfix_m, collect(UInt8,".postfix"), 0)
+
+                dpz = DependentZipper(read_zipper(m), nothing,
+                    (payload, path, c) -> c == 0 ?
+                        (nothing, read_zipper(postfix_m)) :
+                        (nothing, nothing))
+
+                paths = Vector{UInt8}[]
+                while dpz_to_next_val!(dpz)
+                    dpz_child_count(dpz) == 0 && push!(paths, copy(dpz_path(dpz)))
+                end
+                # "roman" has children (romane, romanus, romulus) so is_path_end=false
+                # → "roman.postfix" is NOT included (matches upstream dep_test_1 behavior)
+                leaf_words = filter(w -> !any(startswith(other, w) && other != w for other in words), words)
+                expected = [collect(UInt8, w * ".postfix") for w in sort(leaf_words)]
+                @test sort(paths) == sort(expected)
+            end
+
+            @testset "factor_count and at_root" begin
+                m = PathMap{Int}()
+                set_val_at!(m, collect(UInt8,"a"), 1)
+                dpz = DependentZipper(read_zipper(m), nothing, (p,_,_) -> (p,nothing))
+                @test dpz_factor_count(dpz) == 1
+                @test dpz_at_root(dpz)
+            end
+
+        end
+
+        @testset "Counters (ports counters.rs)" begin
+
+            @testset "count_occupancy basic stats" begin
+                m = PathMap{Int}()
+                for w in ["a","b","ba","bb","c"]
+                    set_val_at!(m, collect(UInt8,w), 1)
+                end
+                c = count_occupancy(m)
+                @test total_nodes(c) >= 1
+                @test total_child_items(c) >= 1
+            end
+
+            @testset "empty map returns zero counters" begin
+                c = count_occupancy(PathMap{Int}())
+                @test total_nodes(c) == 0
+                @test total_child_items(c) == 0
+            end
+
+        end
+
         @testset "PathsSerialization (ports paths_serialization.rs)" begin
 
             @testset "serialize + deserialize round-trip" begin

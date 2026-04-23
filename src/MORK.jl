@@ -106,6 +106,14 @@ include("PathsSerialization.jl")
 # Ports pathmap/src/empty_zipper.rs.
 include("EmptyZipper.jl")
 
+# DependentZipper — product zipper with on-the-fly factor generation.
+# Ports pathmap/src/dependent_zipper.rs.
+include("DependentZipper.jl")
+
+# Counters — trie structural statistics and diagnostic histograms.
+# Ports pathmap/src/counters.rs.
+include("Counters.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """
