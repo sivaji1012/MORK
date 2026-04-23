@@ -81,11 +81,11 @@ end
 CompatSink(e::MORK.Expr) = CompatSink(e, false)
 
 function sink_apply!(s::CompatSink, bindings::Dict{ExprVar,ExprEnv},
-                     path::Vector{UInt8}, btm::PathMap{Nothing})
-    set_val_at!(btm, path, nothing) === nothing && (s.changed = true)
+                     path::Vector{UInt8}, btm::PathMap{UnitVal})
+    set_val_at!(btm, path, UNIT_VAL) === nothing && (s.changed = true)
 end
 
-sink_finalize!(s::CompatSink, ::PathMap{Nothing}) :: Bool = s.changed
+sink_finalize!(s::CompatSink, ::PathMap{UnitVal}) :: Bool = s.changed
 
 # =====================================================================
 # AddSink — [2] + <expr>: insert after skipping [2]+ prefix
@@ -105,12 +105,12 @@ end
 AddSink(e::MORK.Expr) = AddSink(e, false)
 
 function sink_apply!(s::AddSink, bindings::Dict{ExprVar,ExprEnv},
-                     path::Vector{UInt8}, btm::PathMap{Nothing})
+                     path::Vector{UInt8}, btm::PathMap{UnitVal})
     length(path) > 3 || return
-    set_val_at!(btm, path[4:end], nothing) === nothing && (s.changed = true)
+    set_val_at!(btm, path[4:end], UNIT_VAL) === nothing && (s.changed = true)
 end
 
-sink_finalize!(s::AddSink, ::PathMap{Nothing}) :: Bool = s.changed
+sink_finalize!(s::AddSink, ::PathMap{UnitVal}) :: Bool = s.changed
 
 # =====================================================================
 # RemoveSink — [2] - <expr>: collect paths to remove, apply in finalize
@@ -130,17 +130,17 @@ end
 RemoveSink(e::MORK.Expr) = RemoveSink(e, Vector{UInt8}[])
 
 function sink_apply!(s::RemoveSink, bindings::Dict{ExprVar,ExprEnv},
-                     path::Vector{UInt8}, btm::PathMap{Nothing})
+                     path::Vector{UInt8}, btm::PathMap{UnitVal})
     length(path) > 3 || return
     push!(s.to_remove, path[4:end])
 end
 
-function sink_finalize!(s::RemoveSink, btm::PathMap{Nothing}) :: Bool
+function sink_finalize!(s::RemoveSink, btm::PathMap{UnitVal}) :: Bool
     changed = false
     for p in s.to_remove
         old = get_val_at(btm, p)
         if old !== nothing || begin
-            # check if path exists as a key (for PathMap{Nothing}, old===nothing always)
+            # check if path exists as a key (for PathMap{UnitVal}, old===nothing always)
             wz = write_zipper(btm)
             wz_descend_to!(wz, p)
             v = wz_remove_val!(wz, true)
@@ -191,7 +191,7 @@ function HeadSink(e::MORK.Expr)
 end
 
 function sink_apply!(s::HeadSink, bindings::Dict{ExprVar,ExprEnv},
-                     path::Vector{UInt8}, btm::PathMap{Nothing})
+                     path::Vector{UInt8}, btm::PathMap{UnitVal})
     length(path) <= s.skip && return
     mpath = path[s.skip+1:end]
     if length(s.head) < s.max
@@ -203,11 +203,11 @@ function sink_apply!(s::HeadSink, bindings::Dict{ExprVar,ExprEnv},
     end
 end
 
-function sink_finalize!(s::HeadSink, btm::PathMap{Nothing}) :: Bool
+function sink_finalize!(s::HeadSink, btm::PathMap{UnitVal}) :: Bool
     changed = false
     for p in s.head
         old = get_val_at(btm, p)
-        set_val_at!(btm, p, nothing)
+        set_val_at!(btm, p, UNIT_VAL)
         old === nothing && (changed = true)
     end
     changed
@@ -225,26 +225,26 @@ Mirrors `CountSink` in sinks.rs.
 """
 mutable struct CountSink <: AbstractSink
     expr    ::MORK.Expr
-    unique  ::PathMap{Nothing}
+    unique  ::PathMap{UnitVal}
     skip    ::Int
 end
 
 function CountSink(e::MORK.Expr)
     # [4] count <result> <source> <pattern> — skip varies
-    CountSink(e, PathMap{Nothing}(), 0)
+    CountSink(e, PathMap{UnitVal}(), 0)
 end
 
 function sink_apply!(s::CountSink, bindings::Dict{ExprVar,ExprEnv},
-                     path::Vector{UInt8}, btm::PathMap{Nothing})
-    set_val_at!(s.unique, path, nothing)
+                     path::Vector{UInt8}, btm::PathMap{UnitVal})
+    set_val_at!(s.unique, path, UNIT_VAL)
 end
 
-function sink_finalize!(s::CountSink, btm::PathMap{Nothing}) :: Bool
+function sink_finalize!(s::CountSink, btm::PathMap{UnitVal}) :: Bool
     cnt = val_count(s.unique)
     cnt_bytes = Vector{UInt8}(string(cnt))
     key = vcat(UInt8[item_byte(ExprSymbol(UInt8(length(cnt_bytes))))], cnt_bytes)
     old = get_val_at(btm, key)
-    set_val_at!(btm, key, nothing)
+    set_val_at!(btm, key, UNIT_VAL)
     old === nothing
 end
 
@@ -260,17 +260,17 @@ Mirrors `SumSink` in sinks.rs (simplified).
 """
 mutable struct SumSink <: AbstractSink
     expr     ::MORK.Expr
-    unique   ::PathMap{Nothing}
+    unique   ::PathMap{UnitVal}
 end
 
-SumSink(e::MORK.Expr) = SumSink(e, PathMap{Nothing}())
+SumSink(e::MORK.Expr) = SumSink(e, PathMap{UnitVal}())
 
 function sink_apply!(s::SumSink, bindings::Dict{ExprVar,ExprEnv},
-                     path::Vector{UInt8}, btm::PathMap{Nothing})
-    set_val_at!(s.unique, path, nothing)
+                     path::Vector{UInt8}, btm::PathMap{UnitVal})
+    set_val_at!(s.unique, path, UNIT_VAL)
 end
 
-function sink_finalize!(s::SumSink, btm::PathMap{Nothing}) :: Bool
+function sink_finalize!(s::SumSink, btm::PathMap{UnitVal}) :: Bool
     total = Int64(0)
     rz    = read_zipper(s.unique)
     while zipper_to_next_val!(rz)
@@ -289,7 +289,7 @@ function sink_finalize!(s::SumSink, btm::PathMap{Nothing}) :: Bool
     sum_bytes = reinterpret(UInt8, [hton(total)])
     key = vcat(UInt8[item_byte(ExprSymbol(UInt8(8)))], collect(sum_bytes))
     old = get_val_at(btm, key)
-    set_val_at!(btm, key, nothing)
+    set_val_at!(btm, key, UNIT_VAL)
     old === nothing
 end
 
@@ -311,7 +311,7 @@ end
 AndSink(e::MORK.Expr) = AndSink(e, true)
 
 function sink_apply!(s::AndSink, bindings::Dict{ExprVar,ExprEnv},
-                     path::Vector{UInt8}, btm::PathMap{Nothing})
+                     path::Vector{UInt8}, btm::PathMap{UnitVal})
     # Check if path ends in a "false" symbol
     if !isempty(path)
         p    = collect(path)
@@ -323,11 +323,11 @@ function sink_apply!(s::AndSink, bindings::Dict{ExprVar,ExprEnv},
     end
 end
 
-function sink_finalize!(s::AndSink, btm::PathMap{Nothing}) :: Bool
+function sink_finalize!(s::AndSink, btm::PathMap{UnitVal}) :: Bool
     key = s.result ? Vector{UInt8}("true") : Vector{UInt8}("false")
     key_enc = vcat(UInt8[item_byte(ExprSymbol(UInt8(length(key))))], key)
     old = get_val_at(btm, key_enc)
-    set_val_at!(btm, key_enc, nothing)
+    set_val_at!(btm, key_enc, UNIT_VAL)
     old === nothing
 end
 
@@ -344,9 +344,9 @@ struct AUSink   <: AbstractSink; expr::MORK.Expr; end
 struct HashSink <: AbstractSink; expr::MORK.Expr; end
 
 for T in (ACTSink, WASMSink, PureSink, Z3Sink, USink, AUSink, HashSink)
-    @eval sink_apply!(::$T, ::Dict, ::Vector{UInt8}, ::PathMap{Nothing}) =
+    @eval sink_apply!(::$T, ::Dict, ::Vector{UInt8}, ::PathMap{UnitVal}) =
         error($(string(T)) * " not yet ported")
-    @eval sink_finalize!(::$T, ::PathMap{Nothing}) =
+    @eval sink_finalize!(::$T, ::PathMap{UnitVal}) =
         error($(string(T)) * " not yet ported")
 end
 
@@ -362,7 +362,7 @@ function sink_apply!(s::FloatReductionSink, bindings, path, btm)
     # TODO: float extraction and reduction
 end
 
-sink_finalize!(::FloatReductionSink, ::PathMap{Nothing}) = false
+sink_finalize!(::FloatReductionSink, ::PathMap{UnitVal}) = false
 
 # =====================================================================
 # ASink — dispatch union

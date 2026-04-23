@@ -162,7 +162,7 @@ function serialize_paths_with_auxdata(m::PathMap{V,A}, target::IO,
     k = Ref(0)
     z = read_zipper(m)
     # Use structural DFS (zipper_is_val) instead of _to_next_get_val!
-    # so that PathMap{Nothing} works correctly (nothing val ≠ no val).
+    # so that PathMap{UnitVal} works correctly (nothing val ≠ no val).
     serialize_paths_from_funcs(target,
         () -> _paths_ser_to_next_val!(z),
         () -> begin
@@ -174,7 +174,7 @@ function serialize_paths_with_auxdata(m::PathMap{V,A}, target::IO,
         end)
 end
 
-"""DFS to_next_val using structural zipper_is_val (works for PathMap{Nothing})."""
+"""DFS to_next_val using structural zipper_is_val (works for PathMap{UnitVal})."""
 function _paths_ser_to_next_val!(z::ReadZipperCore)
     while true
         if zipper_descend_first_byte!(z)

@@ -77,7 +77,7 @@ end
 
 source_requests(s::CompatSource) = [ResourceRequest(RREQ_BTM)]
 
-function source_factor(s::CompatSource, btm::PathMap{Nothing})
+function source_factor(s::CompatSource, btm::PathMap{UnitVal})
     ReadZipperCore_at_path(btm, UInt8[])
 end
 
@@ -101,7 +101,7 @@ const _BTM_SOURCE_PREFIX = UInt8[
 
 source_requests(s::BTMSource) = [ResourceRequest(RREQ_BTM)]
 
-function source_factor(s::BTMSource, btm::PathMap{Nothing})
+function source_factor(s::BTMSource, btm::PathMap{UnitVal})
     # PrefixZipper over the BTM at the [2] BTM prefix
     inner = ReadZipperCore_at_path(btm, UInt8[])
     pz    = PrefixZipper(_BTM_SOURCE_PREFIX, inner)
@@ -123,7 +123,7 @@ end
 
 source_requests(s::ACTSource) = [ResourceRequest(RREQ_ACT, s.act)]
 
-source_factor(s::ACTSource, btm::PathMap{Nothing}) =
+source_factor(s::ACTSource, btm::PathMap{UnitVal}) =
     error("ACTSource not yet ported")
 
 # ── CmpSource (equality / inequality comparison) ──────────────────────
@@ -141,7 +141,7 @@ end
 
 source_requests(s::CmpSource) = [ResourceRequest(RREQ_BTM)]
 
-source_factor(s::CmpSource, btm::PathMap{Nothing}) =
+source_factor(s::CmpSource, btm::PathMap{UnitVal}) =
     error("CmpSource not yet ported")
 
 # ── ASource — dispatch wrapper ────────────────────────────────────────

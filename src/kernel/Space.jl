@@ -2,12 +2,12 @@
 Space — port of `mork/kernel/src/space.rs`.
 
 The `Space` struct is the central data structure of the MORK kernel: a
-`PathMap{Nothing}` (set-trie of flat byte-encoded expressions) coupled with
+`PathMap{UnitVal}` (set-trie of flat byte-encoded expressions) coupled with
 a `SharedMappingHandle` for symbol interning.
 
 Julia translation notes
 ========================
-  - `PathMap<()>` → `PathMap{Nothing}` (unit-value set-trie)
+  - `PathMap<()>` → `PathMap{UnitVal}` (unit-value set-trie)
   - `#[cfg(feature="interning")]` path → raw-bytes (no-interning) variant
     (symbols stored as raw UTF-8 truncated to 63 bytes, matching the
     `#[cfg(not(feature="interning"))]` code path in upstream)
@@ -73,12 +73,12 @@ end
 """
     Space
 
-Central MORK data structure: a `PathMap{Nothing}` set-trie of flat byte-encoded
+Central MORK data structure: a `PathMap{UnitVal}` set-trie of flat byte-encoded
 expressions plus a symbol intern table.
 Mirrors `Space` in mork/kernel/src/space.rs.
 """
 mutable struct Space
-    btm    ::PathMap{Nothing, GlobalAlloc}
+    btm    ::PathMap{UnitVal, GlobalAlloc}
     sm     ::SharedMappingHandle
     timing ::Bool
 end
@@ -87,7 +87,7 @@ end
 
 Create an empty Space.  Mirrors `Space::new`.
 """
-new_space() = Space(PathMap{Nothing}(), SharedMappingHandle(), false)
+new_space() = Space(PathMap{UnitVal}(), SharedMappingHandle(), false)
 
 """    space_val_count(s) → Int
 
@@ -142,7 +142,7 @@ function _space_load_all_sexpr_impl!(s::Space, src, add::Bool) :: Int
         end
         data = z.root.buf[1:z.loc-1]
         if add
-            set_val_at!(s.btm, data, nothing)
+            set_val_at!(s.btm, data, UNIT_VAL)
         else
             remove_val_at!(s.btm, data)
         end
@@ -199,7 +199,7 @@ function _st_write!(t::SpaceTranscriber, bytes::AbstractVector{UInt8})
     tok  = fe_tokenizer(t.parser, bytes)
     path = vcat(UInt8[item_byte(ExprSymbol(UInt8(length(tok))))], tok)
     wz_descend_to!(t.wz, path)
-    wz_set_val!(t.wz, nothing)
+    wz_set_val!(t.wz, UNIT_VAL)
     wz_ascend!(t.wz, length(path))
     t.count += 1
 end
@@ -289,7 +289,7 @@ eliminate per-failed-unify allocations while preserving this contract.)
 
 Mirrors `Space::query_multi` in space.rs.
 """
-function space_query_multi(btm::PathMap{Nothing}, pat_expr::MORK.Expr,
+function space_query_multi(btm::PathMap{UnitVal}, pat_expr::MORK.Expr,
                             effect::Function) :: Int
     pat_tag = byte_item(pat_expr.buf[1])
     pat_tag isa ExprArity || error("pat_expr must be an Arity node")
@@ -312,7 +312,7 @@ end
 
 # Internal hot path — takes pre-allocated scratch buffers so the
 # per-unify-attempt Dict allocation is eliminated.
-function _space_query_multi_inner!(btm::PathMap{Nothing},
+function _space_query_multi_inner!(btm::PathMap{UnitVal},
                                     pat_expr::MORK.Expr,
                                     n_factors::Int,
                                     effect::Function,
@@ -399,7 +399,7 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr,
 
     # Insert add_expr unconditionally
     add_bytes = collect(add_expr.buf)
-    set_val_at!(s.btm, add_bytes, nothing)
+    set_val_at!(s.btm, add_bytes, UNIT_VAL)
 
     any_new  = Ref(false)
     touched  = space_query_multi(s.btm, pat_expr, (bindings, loc_expr) -> begin
@@ -413,7 +413,7 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr,
                        Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
             result_bytes = oz.root.buf[1:oz.loc-1]
             old = get_val_at(s.btm, result_bytes)
-            set_val_at!(s.btm, result_bytes, nothing)
+            set_val_at!(s.btm, result_bytes, UNIT_VAL)
             old === nothing && (any_new[] = true)
         end
         true
@@ -495,7 +495,7 @@ function space_metta_calculus!(s::Space, steps::Int=typemax(Int)) :: Int
     done = 0
     while done < steps
         # Find next exec expression using the fixed prefix
-        rz = ReadZipperCore_at_path(s.btm, _EXEC_PREFIX)
+        rz = read_zipper_at_path(s.btm, _EXEC_PREFIX)
         found = zipper_to_next_val!(rz)
         !found && break
 

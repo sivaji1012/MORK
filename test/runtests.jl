@@ -2736,9 +2736,9 @@ using MORK
 
         @testset "TrieRef — basic path_exists / val / child_count (trie_ref_test1)" begin
             keys = ["Hello", "Hell", "Help", "Helsinki"]
-            m = PathMap{Nothing}()
+            m = PathMap{UnitVal}()
             for k in keys
-                set_val_at!(m, collect(UInt8, k), nothing)
+                set_val_at!(m, collect(UInt8, k), UNIT_VAL)
             end
 
             # Partial path "He" — exists, no val
@@ -2754,8 +2754,8 @@ using MORK
             # "Help" — leaf val
             tr = trie_ref_at_path(m, collect(UInt8, "Help"))
             @test tr_path_exists(tr)
-            @test tr_get_val(tr) === nothing   # val IS nothing (stored nothing)
-            @test tr_is_val(tr) == false        # nothing val → false
+            @test tr_get_val(tr) isa UnitVal   # val IS UnitVal (unit type)
+            @test tr_is_val(tr) == true         # UnitVal stored → is_val true
 
             # "Hello" — leaf val
             tr = trie_ref_at_path(m, collect(UInt8, "Hello"))
@@ -2775,8 +2775,8 @@ using MORK
 
         @testset "TrieRef — child_count / child_mask at 'H'" begin
             keys = ["Hello", "Hell", "Help", "Helsinki"]
-            m = PathMap{Nothing}()
-            for k in keys; set_val_at!(m, collect(UInt8, k), nothing); end
+            m = PathMap{UnitVal}()
+            for k in keys; set_val_at!(m, collect(UInt8, k), UNIT_VAL); end
 
             tr0 = trie_ref_at_path(m, collect(UInt8, "H"))
             @test tr_path_exists(tr0)
@@ -2948,18 +2948,18 @@ using MORK
         @testset "PathsSerialization (ports paths_serialization.rs)" begin
 
             @testset "serialize + deserialize round-trip" begin
-                m = PathMap{Nothing}()
+                m = PathMap{UnitVal}()
                 words = ["arrow","bow","cannon","roman","romane","romulus","rubens","ruber"]
-                for w in words; set_val_at!(m, collect(UInt8, w), nothing); end
+                for w in words; set_val_at!(m, collect(UInt8, w), UNIT_VAL); end
 
                 buf = IOBuffer()
                 stats = serialize_paths(m, buf)
                 @test stats.path_count == length(words)
                 @test stats.bytes_out > 0
 
-                m2 = PathMap{Nothing}()
+                m2 = PathMap{UnitVal}()
                 seekstart(buf)
-                stats2 = deserialize_paths(m2, buf, nothing)
+                stats2 = deserialize_paths(m2, buf, UNIT_VAL)
                 @test stats2.path_count == length(words)
 
                 # All original paths should be in m2

@@ -887,3 +887,28 @@ export alg_merge
 export status, from_status, flatten, to_algebraic_result, merge_status
 export pjoin, pmeet, psubtract, prestrict, convert_hetero
 export join_into!, join_all
+
+# =====================================================================
+# UnitVal — zero-byte type for set-tries (replaces PathMap{Nothing})
+# =====================================================================
+
+"""
+    UnitVal
+
+Zero-byte unit type for `PathMap{UnitVal}` set-tries.
+Fixes the `PathMap{Nothing}` disambiguation bug: Julia's `nothing` serves
+as BOTH the stored unit value AND the "no value" sentinel, causing
+`DenseByteNode`'s `cf.val !== nothing` check to silently return false
+after trie reorganization (3rd+ insert with shared prefix).
+
+`UnitVal()` is non-nothing, so `cf.val !== nothing` correctly signals
+"value present" at all trie sizes.  Mirrors Rust `PathMap<()>`.
+"""
+struct UnitVal end
+
+const UNIT_VAL = UnitVal()
+
+Base.:(==)(::UnitVal, ::UnitVal) = true
+Base.hash(::UnitVal, h::UInt)    = hash(:UnitVal, h)
+
+export UnitVal, UNIT_VAL
