@@ -145,6 +145,10 @@ include("frontend/Frontend.jl")
 # Ports mork/kernel/src/sources.rs.
 include("kernel/Sources.jl")
 
+# Kernel: pure numeric primitives (u8..f64 arithmetic/bitwise/transcendental).
+# Ports mork/kernel/src/pure.rs.
+include("kernel/Pure.jl")
+
 # Kernel: write sinks (add/remove/head/count/sum/and/etc.).
 # Ports mork/kernel/src/sinks.rs.
 include("kernel/Sinks.jl")
