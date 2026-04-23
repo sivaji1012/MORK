@@ -120,6 +120,10 @@ include("Counters.jl")
 # Ports mork/expr/src/lib.rs.
 include("expr/Expr.jl")
 
+# Symbol interning: 128-bucket PathMap-backed symbol table.
+# Ports mork/interning/src/lib.rs + handle.rs + symbol_backing.rs.
+include("interning/Interning.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """

@@ -3456,4 +3456,92 @@ using MORK
             @test hash(a) != hash(c)
         end
     end
+
+    @testset "Interning (ports mork/interning)" begin
+        @testset "Pearson hash is deterministic" begin
+            @test bounded_pearson_hash(UInt8[]) == 0x00
+            h1 = bounded_pearson_hash(Vector{UInt8}("hello"))
+            h2 = bounded_pearson_hash(Vector{UInt8}("hello"))
+            @test h1 == h2
+            @test bounded_pearson_hash(Vector{UInt8}("hello")) !=
+                  bounded_pearson_hash(Vector{UInt8}("world"))
+        end
+
+        @testset "MorkSymbol identity / hash" begin
+            s1 = MorkSymbol(ntuple(_ -> UInt8(1), 8))
+            s2 = MorkSymbol(ntuple(_ -> UInt8(1), 8))
+            s3 = MorkSymbol(ntuple(i -> UInt8(i), 8))
+            @test s1 == s2
+            @test s1 != s3
+            @test hash(s1) == hash(s2)
+        end
+
+        @testset "get_sym returns nothing before insert" begin
+            h = SharedMappingHandle()
+            @test get_sym(h, Vector{UInt8}("foo")) === nothing
+        end
+
+        @testset "get_sym_or_insert! roundtrip" begin
+            h   = SharedMappingHandle()
+            wp  = try_acquire_permission(h)
+            @test wp !== nothing
+            sym = get_sym_or_insert!(wp, Vector{UInt8}("hello"))
+            @test sym isa MorkSymbol
+            # Second insert returns same symbol
+            sym2 = get_sym_or_insert!(wp, Vector{UInt8}("hello"))
+            @test sym == sym2
+            # Different string → different symbol
+            sym3 = get_sym_or_insert!(wp, Vector{UInt8}("world"))
+            @test sym != sym3
+            release_permission!(wp)
+        end
+
+        @testset "get_sym finds after insert" begin
+            h  = SharedMappingHandle()
+            wp = try_acquire_permission(h)
+            @test wp !== nothing
+            sym = get_sym_or_insert!(wp, Vector{UInt8}("julia"))
+            release_permission!(wp)
+            found = get_sym(h, Vector{UInt8}("julia"))
+            @test found !== nothing
+            @test found == sym
+        end
+
+        @testset "get_bytes roundtrip" begin
+            h   = SharedMappingHandle()
+            wp  = try_acquire_permission(h)
+            @test wp !== nothing
+            sym = get_sym_or_insert!(wp, Vector{UInt8}("mork"))
+            release_permission!(wp)
+            bytes = get_bytes(h, sym)
+            @test bytes !== nothing
+            @test collect(bytes) == Vector{UInt8}("mork")
+        end
+
+        @testset "multiple distinct symbols" begin
+            h  = SharedMappingHandle()
+            wp = try_acquire_permission(h)
+            @test wp !== nothing
+            words = ["alpha","beta","gamma","delta","epsilon"]
+            syms  = [get_sym_or_insert!(wp, Vector{UInt8}(w)) for w in words]
+            release_permission!(wp)
+            @test length(unique(syms)) == length(words)
+            for (sym, w) in zip(syms, words)
+                b = get_bytes(h, sym)
+                @test b !== nothing
+                @test collect(b) == Vector{UInt8}(w)
+            end
+        end
+
+        @testset "try_acquire_permission re-entrant" begin
+            h   = SharedMappingHandle()
+            wp1 = try_acquire_permission(h)
+            @test wp1 !== nothing
+            wp2 = try_acquire_permission(h)   # same task → reuse
+            @test wp2 !== nothing
+            @test wp1.index == wp2.index
+            release_permission!(wp2)
+            release_permission!(wp1)
+        end
+    end
 end
