@@ -40,8 +40,10 @@ past the last consumed byte.  Mirrors the return of `traverseh!` in mork_expr.
 function expr_traverseh(h0, x::MORK.Expr, j0::Int,
                         new_var_cb, var_ref_cb, symbol_cb, zero_cb, add_cb, finalize_cb)
     h = h0
-    # stack entries: (remaining_children::UInt8, accumulated_value)
-    stack = Tuple{UInt8, Any}[]
+    # Lazy stack: only allocated on the first Arity node with arity > 0.
+    # Leaf-only and single-symbol expressions (the common case in unification)
+    # never touch this variable, eliminating the ~180 byte/call Vector allocation.
+    stack = nothing   # Union{Nothing, Vector{Tuple{UInt8,Any}}}
     j = j0
 
     while true
@@ -66,7 +68,12 @@ function expr_traverseh(h0, x::MORK.Expr, j0::Int,
             if tag.arity == 0
                 h, value = finalize_cb(h, j, acc)
             else
-                push!(stack, (tag.arity, acc))
+                # First compound node seen: allocate stack now
+                if stack === nothing
+                    stack = Tuple{UInt8, Any}[(tag.arity, acc)]
+                else
+                    push!(stack, (tag.arity, acc))
+                end
                 continue
             end
         else
@@ -75,7 +82,7 @@ function expr_traverseh(h0, x::MORK.Expr, j0::Int,
 
         # Popping loop: fold value into parent stack frame
         while true
-            isempty(stack) && return (h, value, j)
+            (stack === nothing || isempty(stack)) && return (h, value, j)
             k, acc = stack[end]
             h, new_acc = add_cb(h, j, acc, value)
             k -= UInt8(1)
