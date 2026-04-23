@@ -5,13 +5,11 @@ authors = ["PRIMUS Team"]
 
 [deps]
 SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
-SnoopCompile = "aa65fe97-06da-5843-b5b1-d5d13cad87d2"
 Zlib_jll = "83775a58-1f1d-513f-b197-d71354ab007a"
 
 [compat]
-SnoopCompile = "3.2.5"
 Zlib_jll = "1.3.1"
-julia = "1.12"
+julia = "1.12.6"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"

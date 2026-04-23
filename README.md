@@ -1,12 +1,49 @@
 # MORK
 
-Clean Julia port of [trueagi-io/MORK](https://github.com/trueagi-io/MORK) —
-the high-performance metagraph substrate for Hyperon/MeTTa systems.
+Julia port of [trueagi-io/MORK](https://github.com/trueagi-io/MORK) —
+the high-performance PathMap trie substrate for Hyperon/MeTTa systems.
 
 ## Status
 
-**Phase 0 — skeleton.** See [docs/architecture/MORK_PACKAGE_PLAN.md](../../docs/architecture/MORK_PACKAGE_PLAN.md)
-for the phased implementation roadmap.
+**Phase 1-3 complete.** PathMap substrate (all zipper variants, lattice
+algebra, morphisms, arena compact, serialization) + mork_expr (encoding,
+traversal, unification, apply) + mork_interning + mork_frontend (sexpr,
+JSON parsers) + mork_kernel (Space, Sources, Sinks, Pure, metta_calculus).
+
+1546 unit tests pass. 8/8 integration tests from upstream `main.rs` pass
+(lookup, positive, positive_equal, negative, bipolar, top_level,
+two_positive_equal, two_positive_equal_crossed).
+
+## Development Workflow
+
+**Always use the warm REPL for iteration.** Starting a new Julia process
+per test pays an ~80s precompile tax. Starting the REPL once and using
+`include()` reduces per-run cost to seconds.
+
+```bash
+# Start warm REPL (precompile happens once, ~80s)
+julia --project=. tools/mork_repl.jl
+
+# Inside the REPL — run tests, experiment, iterate cheaply:
+include("test/runtests.jl")       # full suite
+include("/tmp/my_test.jl")        # ad-hoc test file
+space_metta_calculus!(s)          # test interactively
+```
+
+**Before every commit: cold-start verification.** Revise won't catch struct
+redefinitions or type parameter changes. Always confirm on a fresh Julia:
+
+```bash
+touch src/MORK.jl                 # invalidate precompile cache
+julia --project=. -e 'using MORK; include("test/runtests.jl")'
+```
+
+**Use `include()` from the REPL, not piped stdin.** Piping multiline
+commands splits them into individual REPL lines, breaking string literals
+that contain newlines. Write test logic to `/tmp/name.jl` and `include()`
+it from the warm REPL.
+
+## Status
 
 ## Scope
 
