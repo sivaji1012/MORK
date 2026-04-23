@@ -2479,6 +2479,64 @@ using MORK
         end
 
         # ==================================================================
+        # WriteZipper completion — prune, remove_branches, create_path, etc.
+        # ==================================================================
+
+        @testset "wz_remove_branches! — removes all branches" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "ab"), 1)
+            set_val_at!(m, collect(UInt8, "ac"), 2)
+            z = write_zipper(m)
+            @test wz_remove_branches!(z, false)
+            @test wz_val_count(z) == 0
+        end
+
+        @testset "wz_remove_branches! — empty returns false" begin
+            m = PathMap{V}()
+            z = write_zipper(m)
+            @test !wz_remove_branches!(z, false)
+        end
+
+        @testset "wz_prune_path! removes dangling path" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "abc"), 1)
+            z = write_zipper(m)
+            wz_descend_to!(z, collect(UInt8, "abc"))
+            wz_remove_val!(z)
+            # cursor at "abc" which is now dangling
+            wz_prune_path!(z)
+            @test !path_exists_at(m, collect(UInt8, "abc"))
+        end
+
+        @testset "wz_create_path! creates dangling path" begin
+            m = PathMap{V}()
+            z = write_zipper(m)
+            wz_descend_to!(z, collect(UInt8, "xyz"))
+            created = wz_create_path!(z)
+            @test created
+            @test path_exists_at(m, collect(UInt8, "xyz"))
+            @test !wz_is_val(z)
+        end
+
+        @testset "wz_get_or_set_val! sets default when absent" begin
+            m = PathMap{V}()
+            z = write_zipper(m)
+            wz_descend_to!(z, collect(UInt8, "k"))
+            v = wz_get_or_set_val!(z, 42)
+            @test v == 42
+            @test get_val_at(m, collect(UInt8, "k")) == 42
+        end
+
+        @testset "wz_get_or_set_val! returns existing when present" begin
+            m = PathMap{V}()
+            set_val_at!(m, collect(UInt8, "k"), 7)
+            z = write_zipper(m)
+            wz_descend_to!(z, collect(UInt8, "k"))
+            v = wz_get_or_set_val!(z, 99)
+            @test v == 7   # existing value preserved
+        end
+
+        # ==================================================================
         # WriteZipper navigation (ZipperMoving trait — write_zipper.rs:976)
         # ==================================================================
 

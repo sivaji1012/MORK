@@ -885,7 +885,7 @@ function node_remove_dangling!(n::LineListNode{V,A}, key::AbstractVector{UInt8})
     (k0, k1) = get_both_keys(n)
     if is_child_0(n) && k0 == key
         child_rc = into_child(n.slot0)
-        if node_is_empty(as_tagged(child_rc))
+        if is_empty_node(child_rc)
             pruned = if is_used_1(n) && !isempty(k1) && (isempty(key) || key[1] == k1[1])
                 length(key) - 1
             else
@@ -897,7 +897,7 @@ function node_remove_dangling!(n::LineListNode{V,A}, key::AbstractVector{UInt8})
     end
     if is_child_1(n) && k1 == key
         child_rc = into_child(n.slot1)
-        if node_is_empty(as_tagged(child_rc))
+        if is_empty_node(child_rc)
             pruned = if !isempty(k0) && !isempty(key) && key[1] == k0[1]
                 length(key) - 1
             else

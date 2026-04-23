@@ -896,6 +896,199 @@ function wz_take_map!(z::WriteZipperCore{V,A}, prune::Bool=false) where {V,A}
 end
 
 # =====================================================================
+# wz_prune_path! — remove dangling empty paths
+# =====================================================================
+#
+# Mirrors WriteZipperCore::prune_path (write_zipper.rs:2048) +
+# prune_path_internal (write_zipper.rs:2192).
+
+"""
+    wz_prune_path!(z) → Int
+Remove dangling path at the cursor.  Returns bytes pruned.
+Mirrors `WriteZipperCore::prune_path`.
+"""
+function wz_prune_path!(z::WriteZipperCore{V,A}) where {V,A}
+    nk = collect(_wz_node_key(z))
+    isempty(nk) && return 0
+    focus_node = z.focus_stack[end].node
+    node_pruned = node_remove_dangling!(focus_node, nk)
+    trie_pruned = node_pruned > 0 ? _wz_prune_path_internal!(z) : 0
+    max(node_pruned, trie_pruned)
+end
+
+"""
+    _wz_prune_path_internal!(z) → Int
+Ascend and remove empty ancestor nodes.  Internal; mirrors `prune_path_internal`.
+"""
+function _wz_prune_path_internal!(z::WriteZipperCore{V,A}) where {V,A}
+    pruned = 0
+    while true
+        inner = z.focus_stack[end].node
+        # node is empty if it's nothing OR its inner node says so
+        is_empty = (inner === nothing) || node_is_empty(inner)
+        is_empty || break
+        wz_at_root(z) && break
+        old_len = length(z.prefix_buf)
+        wz_ascend!(z, 1) || break
+        nk = collect(_wz_node_key(z))
+        parent_inner = z.focus_stack[end].node
+        if !isempty(nk) && parent_inner !== nothing
+            node_remove_all_branches!(parent_inner, nk, true)
+        end
+        pruned += old_len - length(z.prefix_buf)
+        parent_empty = (parent_inner === nothing) || node_is_empty(parent_inner)
+        (parent_empty && !wz_is_val(z)) || break
+    end
+    pruned
+end
+
+# =====================================================================
+# wz_remove_branches! — remove all branches at cursor
+# =====================================================================
+#
+# Mirrors WriteZipperCore::remove_branches (write_zipper.rs:1948).
+
+"""
+    wz_remove_branches!(z, prune=false) → Bool
+Remove all branches at the cursor position.
+Returns `true` if any branches were removed.
+Mirrors `WriteZipperCore::remove_branches`.
+"""
+function wz_remove_branches!(z::WriteZipperCore{V,A}, prune::Bool=false) where {V,A}
+    nk = collect(_wz_node_key(z))
+    focus_node = z.focus_stack[end].node
+    if !isempty(nk)
+        removed = node_remove_all_branches!(focus_node, nk, prune)
+        if removed && prune
+            _wz_prune_path_internal!(z)
+        end
+        removed
+    else
+        # At root: replace with empty node
+        wz_at_root(z) || return false
+        node_is_empty(focus_node) && return false
+        empty_rc = TrieNodeODRc(LineListNode{V,A}(z.alloc), z.alloc)
+        z.pathmap.root = empty_rc
+        z.focus_stack[1] = empty_rc
+        true
+    end
+end
+
+# =====================================================================
+# wz_remove_unmasked_branches! — keep only masked branches
+# =====================================================================
+#
+# Mirrors WriteZipperCore::remove_unmasked_branches (write_zipper.rs:1975).
+
+"""
+    wz_remove_unmasked_branches!(z, mask::ByteMask, prune=false)
+Remove all branches whose first byte is NOT set in `mask`.
+Mirrors `WriteZipperCore::remove_unmasked_branches`.
+"""
+function wz_remove_unmasked_branches!(z::WriteZipperCore{V,A},
+                                       mask::ByteMask, prune::Bool=false) where {V,A}
+    nk = collect(_wz_node_key(z))
+    focus_node = z.focus_stack[end].node
+    node_remove_unmasked_branches!(focus_node, nk, mask, prune)
+    if prune
+        _wz_prune_path_internal!(z)
+    end
+end
+
+# =====================================================================
+# wz_create_path! — create a dangling path
+# =====================================================================
+#
+# Mirrors WriteZipperCore::create_path (write_zipper.rs:2010).
+
+"""
+    wz_create_path!(z) → Bool
+Create a dangling (no value) path at the cursor.
+Returns `true` if the path was newly created.
+Mirrors `WriteZipperCore::create_path`.
+"""
+function wz_create_path!(z::WriteZipperCore{V,A}) where {V,A}
+    nk = collect(_wz_node_key(z))
+    isempty(nk) && return false   # at root — can't create dangling
+    (created_path, created_subnode) = _wz_in_mut_static_result!(z,
+        (node, key) -> node_create_dangling!(node, key),
+        (_, _)      -> (true, true))
+    if created_subnode
+        _wz_mend_root!(z)
+        _wz_descend_to_internal!(z)
+    end
+    created_path
+end
+
+# =====================================================================
+# wz_get_val_mut / wz_get_or_set_val! — val access (Julia adaptation)
+# =====================================================================
+#
+# In Rust, get_val_mut returns &mut V.  In Julia we use a get+set pattern.
+# `wz_get_val_mut` returns the current value (same as wz_get_val).
+# Use wz_set_val! to write back a modified value.
+
+"""
+    wz_get_val_mut(z) → Union{Nothing, V}
+Return the value at the cursor (Julia mutable equivalent: get then set_val!).
+Mirrors `WriteZipperCore::get_val_mut`.
+"""
+wz_get_val_mut(z::WriteZipperCore) = wz_get_val(z)
+
+"""
+    wz_get_or_set_val!(z, default::V) → V
+Return the value at the cursor, setting `default` if none exists.
+Mirrors `WriteZipperCore::get_val_or_set_mut`.
+"""
+function wz_get_or_set_val!(z::WriteZipperCore{V,A}, default::V) where {V,A}
+    wz_is_val(z) || wz_set_val!(z, default)
+    wz_get_val(z)::V
+end
+
+# =====================================================================
+# wz_join_into_take! — join and consume src subtrie
+# =====================================================================
+#
+# Mirrors WriteZipperCore::join_into_take (write_zipper.rs:1589).
+
+"""
+    wz_join_into_take!(z, src_anr, prune=false) → AlgebraicStatus
+Join `src_anr` subtrie into `z`, consuming the src.
+Returns the algebraic status of the operation.
+Mirrors `WriteZipperCore::join_into_take`.
+"""
+function wz_join_into_take!(z::WriteZipperCore{V,A},
+                              src_anr::AbstractNodeRef{V,A},
+                              prune::Bool=false) where {V,A}
+    if is_none(src_anr)
+        focus_anr = _wz_get_focus_anr(z)
+        return (is_none(focus_anr) || node_is_empty(as_tagged(focus_anr))) ?
+               ALG_STATUS_NONE : ALG_STATUS_IDENTITY
+    end
+    src_rc = into_option(src_anr)
+    src_rc === nothing && return ALG_STATUS_NONE
+
+    self_rc = wz_take_focus!(z, false)
+    if self_rc !== nothing
+        result = join_into_dyn!(self_rc.node, src_rc)
+        if result isa Tuple
+            status, ok_or_replacement = result
+            if ok_or_replacement isa TrieNodeODRc
+                _wz_graft_internal!(z, ok_or_replacement)
+            else
+                _wz_graft_internal!(z, self_rc)
+            end
+            return status
+        end
+        _wz_graft_internal!(z, self_rc)
+        ALG_STATUS_ELEMENT
+    else
+        _wz_graft_internal!(z, src_rc)
+        ALG_STATUS_ELEMENT
+    end
+end
+
+# =====================================================================
 # Exports
 # =====================================================================
 
@@ -916,4 +1109,9 @@ export wz_descend_to_byte!, wz_descend_indexed_byte!
 export wz_descend_first_byte!, wz_ascend_byte!
 export wz_to_next_sibling_byte!, wz_to_prev_sibling_byte!
 export wz_take_focus!, wz_take_map!
+export wz_prune_path!, _wz_prune_path_internal!
+export wz_remove_branches!, wz_remove_unmasked_branches!
+export wz_create_path!
+export wz_get_val_mut, wz_get_or_set_val!
+export wz_join_into_take!
 export tr_get_focus_anr
