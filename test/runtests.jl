@@ -3368,4 +3368,92 @@ using MORK
         end
 
     end
+
+    # =========================================================================
+    # Phase 2: Expression layer (mork_expr)
+    # =========================================================================
+
+    @testset "Expr — Rule of 64 encoding" begin
+        @testset "item_byte / byte_item roundtrip" begin
+            @test item_byte(ExprNewVar()) == 0xC0
+            @test item_byte(ExprVarRef(UInt8(0))) == 0x80
+            @test item_byte(ExprVarRef(UInt8(3))) == 0x83
+            @test item_byte(ExprVarRef(UInt8(63))) == 0xBF
+            @test item_byte(ExprSymbol(UInt8(1))) == 0xC1
+            @test item_byte(ExprSymbol(UInt8(5))) == 0xC5
+            @test item_byte(ExprArity(UInt8(0))) == 0x00
+            @test item_byte(ExprArity(UInt8(2))) == 0x02
+
+            @test byte_item(0xC0) isa ExprNewVar
+            @test byte_item(0x83) isa ExprVarRef
+            @test byte_item(0x83).idx == 0x03
+            @test byte_item(0xC3) isa ExprSymbol
+            @test byte_item(0xC3).size == 0x03
+            @test byte_item(0x02) isa ExprArity
+            @test byte_item(0x02).arity == 0x02
+        end
+
+        @testset "Expr basics" begin
+            e = MORK.Expr(UInt8[0xC0])         # single NewVar
+            @test length(e) == 1
+            @test !isempty(e)
+            @test expr_tag_at(e) isa ExprNewVar
+        end
+
+        @testset "expr_span — symbol" begin
+            # arity-2 node [foo, bar]: [2] "foo" "bar"
+            buf = UInt8[0x02, 0xC3, UInt8('f'), UInt8('o'), UInt8('o'),
+                                0xC3, UInt8('b'), UInt8('a'), UInt8('r')]
+            e = MORK.Expr(buf)
+            sp = expr_span(e, 1)
+            @test length(sp) == length(buf)
+        end
+
+        @testset "expr_serialize" begin
+            # single NewVar
+            s = expr_serialize(UInt8[0xC0])
+            @test s == "\$"
+
+            # VarRef(1) — displayed as "_2" (1-based)
+            s2 = expr_serialize(UInt8[0x81])
+            @test s2 == "_2"
+
+            # Arity-0 leaf
+            s3 = expr_serialize(UInt8[0x00])
+            @test s3 == "[0]"
+
+            # Symbol "hi"
+            s4 = expr_serialize(UInt8[0xC2, UInt8('h'), UInt8('i')])
+            @test s4 == "hi"
+        end
+
+        @testset "ExprZipper navigation" begin
+            buf = UInt8[0xC0, 0x80]   # NewVar, VarRef(0)
+            z = ExprZipper(buf)
+            @test ez_tag(z) isa ExprNewVar
+            @test ez_next!(z)
+            @test ez_tag(z) isa ExprVarRef
+            @test !ez_next!(z)
+        end
+
+        @testset "ExprEnv var_opt" begin
+            buf = UInt8[0xC0, 0x81]   # NewVar at offset 0, VarRef(1) at offset 1
+            ee0 = ExprEnv(0, MORK.Expr(buf))
+            @test ee_var_opt(ee0) == (UInt8(0), UInt8(0))
+            ee1 = ee_offset(ee0, 1)
+            vo = ee_var_opt(ee1)
+            @test vo !== nothing
+            @test vo[2] == UInt8(1)
+        end
+
+        @testset "OwnedSourceItem hash / equality" begin
+            a = OwnedSourceItem("hello")
+            b = OwnedSourceItem("hello")
+            c = OwnedSourceItem("world")
+            @test a == b
+            @test a != c
+            @test hash(a) == hash(b)
+            @test hash(a) != hash(c)
+        end
+    end
 end

@@ -114,6 +114,12 @@ include("DependentZipper.jl")
 # Ports pathmap/src/counters.rs.
 include("Counters.jl")
 
+# ── Phase 2: Expression layer (mork_expr crate) ──────────────────────────────
+
+# Core expression types: byte encoding, ExprZipper, ExprEnv, OwnedSourceItem.
+# Ports mork/expr/src/lib.rs.
+include("expr/Expr.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """
