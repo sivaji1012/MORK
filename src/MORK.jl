@@ -141,6 +141,10 @@ include("interning/Interning.jl")
 # Ports mork/frontend/src/bytestring_parser.rs + json_parser.rs.
 include("frontend/Frontend.jl")
 
+# Kernel: query source abstraction (BTM/ACT/Z3/CmpSource).
+# Ports mork/kernel/src/sources.rs.
+include("kernel/Sources.jl")
+
 # Kernel: Space struct + pattern-matching query engine.
 # Ports mork/kernel/src/space.rs (core subset; Z3/mmap/coroutine paths stubbed).
 include("kernel/Space.jl")
