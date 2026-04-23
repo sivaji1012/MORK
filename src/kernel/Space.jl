@@ -400,6 +400,96 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr,
 end
 
 # =====================================================================
+# space_interpret! / space_metta_calculus! — rule evaluation engine
+# =====================================================================
+
+# exec prefix: [4] exec  (6 bytes)
+const _EXEC_PREFIX = UInt8[
+    item_byte(ExprArity(UInt8(4))),
+    item_byte(ExprSymbol(UInt8(4))),
+    UInt8('e'), UInt8('x'), UInt8('e'), UInt8('c')
+]
+
+"""
+    space_interpret!(s, rt) → Bool
+
+Execute one `(exec loc pat_expr tpl_expr)` rule expression.
+Mirrors `Space::interpret` in space.rs (simplified, no specialize_io).
+"""
+function space_interpret!(s::Space, rt::MORK.Expr) :: Bool
+    buf = rt.buf
+    length(buf) < 6 && return false
+
+    # Check shape: [4] exec
+    t1 = byte_item(buf[1])
+    (t1 isa ExprArity && t1.arity == 4) || return false
+    t2 = byte_item(buf[2])
+    (t2 isa ExprSymbol && t2.size == 4) || return false
+    buf[3:6] == Vector{UInt8}("exec") || return false
+
+    # Decompose args: (exec loc pat_expr tpl_expr)
+    ee_rt = ExprEnv(UInt8(0), UInt8(0), UInt32(0), rt)
+    args  = ExprEnv[]
+    ee_args!(ee_rt, args)
+    length(args) < 3 && return false
+
+    # args[1]=loc (ignored), args[2]=pat_expr, args[3]=tpl_expr
+    pat_ee = args[2]
+    tpl_ee = args[3]
+
+    # Validate pat_expr shape: must be Arity node with `,` or `I` functor
+    pat_buf = pat_ee.base.buf
+    pat_off = Int(pat_ee.offset)
+    length(pat_buf) <= pat_off && return false
+    pt = byte_item(pat_buf[pat_off + 1])
+    (pt isa ExprArity && pt.arity > 0) || return false
+    length(pat_buf) <= pat_off + 1 && return false
+    pt2 = byte_item(pat_buf[pat_off + 2])
+    (pt2 isa ExprSymbol && pt2.size == 1) || return false
+
+    # Validate tpl_expr shape: must be Arity node with `,` or `O` functor
+    tpl_buf = tpl_ee.base.buf
+    tpl_off = Int(tpl_ee.offset)
+    length(tpl_buf) <= tpl_off && return false
+    tt = byte_item(tpl_buf[tpl_off + 1])
+    (tt isa ExprArity && tt.arity > 0) || return false
+
+    pat_expr = MORK.Expr(pat_buf[pat_off+1 : end])
+    tpl_expr = MORK.Expr(tpl_buf[tpl_off+1 : end])
+
+    space_transform_multi_multi!(s, pat_expr, tpl_expr, rt)
+    true
+end
+
+"""
+    space_metta_calculus!(s, steps=∞) → Int
+
+Repeatedly find `(exec ...)` expressions in the space, remove and execute them.
+Returns the number of steps performed.
+Mirrors `Space::metta_calculus` in space.rs.
+"""
+function space_metta_calculus!(s::Space, steps::Int=typemax(Int)) :: Int
+    done = 0
+    while done < steps
+        # Find next exec expression using the fixed prefix
+        rz = ReadZipperCore_at_path(s.btm, _EXEC_PREFIX)
+        found = zipper_to_next_val!(rz)
+        !found && break
+
+        # Full path = prefix + relative path
+        rel_path  = collect(zipper_path(rz))
+        full_path = vcat(_EXEC_PREFIX, rel_path)
+
+        remove_val_at!(s.btm, full_path)
+
+        rt = MORK.Expr(full_path)
+        space_interpret!(s, rt)
+        done += 1
+    end
+    done
+end
+
+# =====================================================================
 # Exports
 # =====================================================================
 
@@ -409,3 +499,4 @@ export Space, new_space, space_val_count, space_statistics
 export space_add_all_sexpr!, space_remove_all_sexpr!
 export space_dump_all_sexpr, space_load_json!
 export BreakQuery, space_query_multi, space_transform_multi_multi!
+export space_interpret!, space_metta_calculus!
