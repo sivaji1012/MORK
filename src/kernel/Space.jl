@@ -283,6 +283,10 @@ Return the total number of candidates examined.
 remaining children are the sources (patterns to unify against).
 Matches iterate via `ProductZipper` (the `#[cfg(feature="no_search")]` path).
 
+The `bindings` Dict passed to `effect` is a fresh allocation per match — safe
+to retain across calls.  (Internal path uses a scratch Dict + copy-on-yield to
+eliminate per-failed-unify allocations while preserving this contract.)
+
 Mirrors `Space::query_multi` in space.rs.
 """
 function space_query_multi(btm::PathMap{Nothing}, pat_expr::MORK.Expr,
@@ -293,50 +297,69 @@ function space_query_multi(btm::PathMap{Nothing}, pat_expr::MORK.Expr,
     n_factors > 0 || error("pat_expr arity must be > 0")
 
     if n_factors == 1
-        # trivial: no sources, just call effect with empty bindings
         effect(Dict{ExprVar,ExprEnv}(), pat_expr.buf)
         return 1
     end
 
-    # Decompose pat_expr into its args (child ExprEnvs)
+    # Scratch Dict allocated once per query; reused across unify attempts.
+    # On match: copied to a fresh Dict before calling effect (Option A).
+    _bindings_scratch = Dict{ExprVar, ExprEnv}()
+    _pairs_scratch    = Tuple{ExprEnv, ExprEnv}[]
+
+    _space_query_multi_inner!(btm, pat_expr, n_factors, effect,
+                               _bindings_scratch, _pairs_scratch)
+end
+
+# Internal hot path — takes pre-allocated scratch buffers so the
+# per-unify-attempt Dict allocation is eliminated.
+function _space_query_multi_inner!(btm::PathMap{Nothing},
+                                    pat_expr::MORK.Expr,
+                                    n_factors::Int,
+                                    effect::Function,
+                                    bindings_scratch::Dict{ExprVar, ExprEnv},
+                                    pairs_scratch::Vector{Tuple{ExprEnv, ExprEnv}}) :: Int
     pat_args = ExprEnv[]
     ee0 = ExprEnv(UInt8(0), UInt8(0), UInt32(0), pat_expr)
     ee_args!(ee0, pat_args)
-    sources = pat_args[2:end]    # first arg is the "add" template
+    sources = pat_args[2:end]
 
     candidate = 0
     try
-        # Use ProductZipper: primary zipper + (n_factors-2) secondary zippers
-        primary = ReadZipperCore_at_path(btm, UInt8[])
-        secondaries = [ReadZipperCore_at_path(btm, UInt8[]) for _ in 1:(n_factors-2)]
-        prz = ProductZipper(primary, secondaries)
+        primary     = read_zipper_at_path(btm, UInt8[])
+        secondaries = [read_zipper_at_path(btm, UInt8[]) for _ in 1:(n_factors-2)]
+        prz         = ProductZipper(primary, secondaries)
 
         while pz_to_next_val!(prz)
-            # Only act when focus is at the last factor
             pz_focus_factor(prz) != pz_factor_count(prz) - 1 && continue
 
-            # Reconstruct expression from full path (origin_path)
-            full_path = collect(pz_origin_path(prz))
-            factor_indices = pz_path_indices(prz)
+            full_path      = collect(pz_path(prz))
+            factor_indices = prz.factor_paths
 
-            # Build unification pairs: (source_i, sub_expr_from_path_at_factor_i)
-            pairs = Tuple{ExprEnv, ExprEnv}[]
-            # First source vs full path
-            push!(pairs, (sources[1],
-                         ExprEnv(UInt8(1), UInt8(0), UInt32(0), MORK.Expr(full_path))))
-            # Additional sources vs sub-paths at factor boundaries
+            # Build pairs into scratch Vector (reuse allocation)
+            empty!(pairs_scratch)
+            push!(pairs_scratch,
+                  (sources[1],
+                   ExprEnv(UInt8(1), UInt8(0), UInt32(0), MORK.Expr(full_path))))
             for (src_i, other_idx) in zip(sources[2:end], factor_indices)
                 sub_expr = MORK.Expr(full_path[other_idx+1:end])
-                push!(pairs, (src_i,
-                             ExprEnv(UInt8(length(pairs)+1), UInt8(0), UInt32(0), sub_expr)))
+                push!(pairs_scratch,
+                      (src_i,
+                       ExprEnv(UInt8(length(pairs_scratch)+1), UInt8(0), UInt32(0), sub_expr)))
             end
 
-            result = expr_unify(collect(pairs))
-            if result isa Dict
+            # Unify into scratch Dict (zero alloc on failure)
+            result = _expr_unify_inplace!(pairs_scratch, bindings_scratch)
+            if result === true
                 candidate += 1
-                if !effect(result, MORK.Expr(full_path))
+                # Copy scratch → fresh Dict before yielding to user (Option A).
+                # This preserves the public contract: effect may retain bindings.
+                bindings_out = copy(bindings_scratch)
+                empty!(bindings_scratch)
+                if !effect(bindings_out, MORK.Expr(full_path))
                     throw(BreakQuery())
                 end
+            else
+                empty!(bindings_scratch)   # failed — clear for next attempt
             end
         end
     catch e
@@ -498,5 +521,6 @@ export SpaceParser
 export Space, new_space, space_val_count, space_statistics
 export space_add_all_sexpr!, space_remove_all_sexpr!
 export space_dump_all_sexpr, space_load_json!
-export BreakQuery, space_query_multi, space_transform_multi_multi!
+export BreakQuery, space_query_multi, _space_query_multi_inner!
+export space_transform_multi_multi!
 export space_interpret!, space_metta_calculus!

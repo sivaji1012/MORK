@@ -174,13 +174,39 @@ UnificationFailure(::Val{:max_iter}, n::Int) =
 const MAX_UNIFY_ITER = 1000
 
 """
+    _expr_unify_inplace!(pairs, bindings) → Union{Bool, UnificationFailure}
+
+Internal scratch-Dict variant: clears `bindings`, fills it in-place, returns
+`true` on success or a `UnificationFailure`.  Caller must NOT retain the Dict
+across calls — use `copy(bindings)` before passing to user code.
+
+Used by `_space_query_multi_inner!` to eliminate per-call Dict allocation.
+Public callers use `expr_unify` which allocates a fresh Dict.
+"""
+function _expr_unify_inplace!(pairs::Vector{Tuple{ExprEnv, ExprEnv}},
+                               bindings::Dict{ExprVar, ExprEnv}) :: Union{Bool, UnificationFailure}
+    empty!(bindings)
+    result = _expr_unify_core!(pairs, bindings)
+    result isa UnificationFailure ? result : true
+end
+
+"""
     expr_unify(stack) → Union{Dict{ExprVar,ExprEnv}, UnificationFailure}
 
-Unify pairs of `ExprEnv`s. Returns the most-general bindings map or a failure.
+Unify pairs of `ExprEnv`s. Returns a fresh bindings map on success or a failure.
+Public API — always allocates a new Dict; safe to retain the result.
 Mirrors `unify` in mork_expr.
 """
 function expr_unify(stack::Vector{Tuple{ExprEnv, ExprEnv}}) :: Union{Dict{ExprVar, ExprEnv}, UnificationFailure}
     bindings = Dict{ExprVar, ExprEnv}()
+    result   = _expr_unify_core!(stack, bindings)
+    result isa UnificationFailure ? result : bindings
+end
+
+# Shared implementation: fills `bindings` (which must already be empty/cleared).
+# Returns `bindings` on success or `UnificationFailure`.
+function _expr_unify_core!(stack::Vector{Tuple{ExprEnv, ExprEnv}},
+                            bindings::Dict{ExprVar, ExprEnv}) :: Union{Dict{ExprVar, ExprEnv}, UnificationFailure}
     iters    = 0
 
     # deref: follow chain of bindings
@@ -271,7 +297,7 @@ function expr_unify(stack::Vector{Tuple{ExprEnv, ExprEnv}}) :: Union{Dict{ExprVa
         end
     end
 
-    bindings
+    bindings   # success: return the filled Dict
 end
 
 # =====================================================================
@@ -448,5 +474,5 @@ end
 
 export expr_traverseh, ee_args!
 export UnificationFailureKind, UNIF_OCCURS, UNIF_DIFFERENCE, UNIF_MAX_ITER
-export UnificationFailure, expr_unify
+export UnificationFailure, expr_unify, _expr_unify_inplace!
 export expr_apply, ee_show
