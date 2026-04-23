@@ -2787,6 +2787,57 @@ using MORK
             zt_release!(t)
         end
 
+        @testset "OverlayZipper (ports overlay_zipper.rs)" begin
+
+            @testset "union of disjoint maps" begin
+                a = PathMap{Int}()
+                set_val_at!(a, collect(UInt8,"a"), 1)
+                b = PathMap{Int}()
+                set_val_at!(b, collect(UInt8,"b"), 2)
+                oz = OverlayZipper(read_zipper(a), read_zipper(b))
+                @test oz_child_count(oz) == 2
+                @test test_bit(oz_child_mask(oz), UInt8('a'))
+                @test test_bit(oz_child_mask(oz), UInt8('b'))
+            end
+
+            @testset "A-value wins over B-value" begin
+                a = PathMap{Int}()
+                set_val_at!(a, collect(UInt8,"k"), 1)
+                b = PathMap{Int}()
+                set_val_at!(b, collect(UInt8,"k"), 2)
+                oz = OverlayZipper(read_zipper(a), read_zipper(b))
+                oz_descend_to!(oz, collect(UInt8,"k"))
+                @test oz_is_val(oz)
+                @test oz_val(oz) == 1   # A wins
+            end
+
+            @testset "to_next_val iterates all overlay values" begin
+                a = PathMap{Int}()
+                set_val_at!(a, collect(UInt8,"a"), 1)
+                set_val_at!(a, collect(UInt8,"b"), 2)
+                b = PathMap{Int}()
+                set_val_at!(b, collect(UInt8,"c"), 3)
+                oz = OverlayZipper(read_zipper(a), read_zipper(b))
+                vals = Int[]
+                while oz_to_next_val!(oz)
+                    push!(vals, oz_val(oz))
+                end
+                @test sort(vals) == [1, 2, 3]
+            end
+
+            @testset "reset restores to root" begin
+                a = PathMap{Int}()
+                set_val_at!(a, collect(UInt8,"abc"), 1)
+                b = PathMap{Int}()
+                oz = OverlayZipper(read_zipper(a), read_zipper(b))
+                oz_descend_to!(oz, collect(UInt8,"abc"))
+                @test oz_is_val(oz)
+                oz_reset!(oz)
+                @test isempty(oz_path(oz))
+            end
+
+        end
+
         @testset "zt_into_reader — write → read downgrade" begin
             stp = SharedTrackerPaths()
             path = collect(UInt8, "w")

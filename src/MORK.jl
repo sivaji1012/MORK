@@ -77,6 +77,10 @@ include("ZipperTracking.jl")
 # Ports pathmap/src/zipper_head.rs.
 include("ZipperHead.jl")
 
+# OverlayZipper — virtual union of two source tries.
+# Ports pathmap/src/overlay_zipper.rs.
+include("OverlayZipper.jl")
+
 # Further includes land per phase — see MORK_PACKAGE_PLAN.md.
 
 """
