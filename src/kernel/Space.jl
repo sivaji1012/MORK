@@ -509,21 +509,21 @@ Mirrors `Space::metta_calculus` in space.rs.
 function space_metta_calculus!(s::Space, steps::Int=typemax(Int)) :: Int
     done = 0
     while done < steps
-        # Find next exec expression using the fixed prefix
         rz = read_zipper_at_path(s.btm, _EXEC_PREFIX)
         found = zipper_to_next_val!(rz)
         !found && break
 
-        # Full path = prefix + relative path
         rel_path  = collect(zipper_path(rz))
         full_path = vcat(_EXEC_PREFIX, rel_path)
 
         remove_val_at!(s.btm, full_path)
 
         rt = MORK.Expr(full_path)
+        @debug "metta_calculus" step=done+1 path_len=length(full_path) atoms=space_val_count(s)
         space_interpret!(s, rt)
         done += 1
     end
+    @debug "metta_calculus done" total_steps=done atoms=space_val_count(s)
     done
 end
 
@@ -539,3 +539,11 @@ export space_dump_all_sexpr, space_load_json!
 export BreakQuery, space_query_multi, _space_query_multi_inner!
 export space_transform_multi_multi!
 export space_interpret!, space_metta_calculus!
+
+# Precompile hot-path method specializations so JIT fires at package load,
+# not on first user call. Mirrors upstream's statically-compiled hot paths.
+precompile(space_metta_calculus!, (Space, Int))
+precompile(space_interpret!, (Space, MORK.Expr))
+precompile(space_add_all_sexpr!, (Space, String))
+precompile(space_dump_all_sexpr, (Space,))
+precompile(_space_query_multi_inner!, (PathMap{UnitVal}, MORK.Expr, Int, Function, Dict{ExprVar,ExprEnv}, Vector{Tuple{ExprEnv,ExprEnv}}))

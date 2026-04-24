@@ -3828,5 +3828,11 @@ using MORK
             @test occursin("bar", result)
         end
 
+        @testset "two_bipolar_equal_crossed — variable substitution in output" begin
+            result = _mc("(exec 0 (, (Something \$x \$y) (Else \$x \$y)) (, (MATCHED \$x \$y)))\n" *
+                         "(Something (foo \$x) (foo \$x))\n(Else (\$x bar) (\$x bar))\n")
+            @test occursin("(MATCHED (foo bar) (foo bar))", result)
+        end
+
     end   # metta_calculus integration
 end

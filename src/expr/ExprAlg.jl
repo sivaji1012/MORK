@@ -331,7 +331,6 @@ function expr_apply(n::UInt8, original_intros::UInt8, new_intros::UInt8,
             key = (n, original_intros)
             bound = get(bindings, key, nothing)
             if bound === nothing
-                # not in bindings — check assignments for existing intro
                 pos = findfirst(==(key), assignments)
                 if pos !== nothing
                     ez_write_var_ref!(oz, UInt8(pos - 1))
@@ -340,26 +339,24 @@ function expr_apply(n::UInt8, original_intros::UInt8, new_intros::UInt8,
                     new_intros += UInt8(1)
                     push!(assignments, key)
                 end
-                oz.loc += 1
                 original_intros += UInt8(1)
             else
-                # bound — check for cycles
                 if haskey(cycled, key)
                     ez_write_var_ref!(oz, cycled[key])
-                    oz.loc += 1
                 elseif key in stack
                     cycled[key] = new_intros
                     ez_write_new_var!(oz)
-                    oz.loc += 1
                     new_intros += UInt8(1)
                 else
                     push!(stack, key)
-                    sub_ez = ExprZipper(MORK.Expr(bound.base.buf), Int(bound.offset) + 1)
+                    sub_span = expr_span(bound.base, Int(bound.offset) + 1)
+                    sub_ez = ExprZipper(MORK.Expr(Vector{UInt8}(sub_span)), 1)
                     _, new_intros = expr_apply(bound.n, bound.v, new_intros, sub_ez, bindings, oz, cycled, stack, assignments)
                     pop!(stack)
                 end
                 original_intros += UInt8(1)
             end
+            ez.loc += 1
 
         elseif tag isa ExprVarRef
             idx = tag.idx
@@ -374,38 +371,34 @@ function expr_apply(n::UInt8, original_intros::UInt8, new_intros::UInt8,
                     new_intros += UInt8(1)
                     push!(assignments, key)
                 end
-                oz.loc += 1
             else
                 if haskey(cycled, key)
                     ez_write_var_ref!(oz, cycled[key])
-                    oz.loc += 1
                 elseif key in stack
                     cycled[key] = new_intros
                     ez_write_new_var!(oz)
-                    oz.loc += 1
                     new_intros += UInt8(1)
                 else
                     push!(stack, key)
-                    sub_ez = ExprZipper(MORK.Expr(bound.base.buf), Int(bound.offset) + 1)
+                    sub_span = expr_span(bound.base, Int(bound.offset) + 1)
+                    sub_ez = ExprZipper(MORK.Expr(Vector{UInt8}(sub_span)), 1)
                     _, new_intros = expr_apply(bound.n, bound.v, new_intros, sub_ez, bindings, oz, cycled, stack, assignments)
                     pop!(stack)
                 end
             end
+            ez.loc += 1
 
         elseif tag isa ExprSymbol
             n_sym = Int(tag.size)
             sym_bytes = view(ez.root.buf, ez.loc+1 : ez.loc+n_sym)
             ez_write_symbol!(oz, sym_bytes)
             ez.loc += 1 + n_sym
-            oz.loc  # already advanced by ez_write_symbol!
-            # continue (don't call ez_next! here — we advanced manually)
             _check = ez.loc <= length(ez.root)
             _check || return (original_intros, new_intros)
             continue
 
         elseif tag isa ExprArity
             ez_write_arity!(oz, tag.arity)
-            oz.loc += 1   # skip past the arity we just wrote (ez_write_arity! already advanced)
             ez.loc += 1
         end
 
