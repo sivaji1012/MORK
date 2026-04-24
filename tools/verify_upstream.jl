@@ -86,10 +86,17 @@ const UPSTREAM_TESTS = [
      x -> !occursin("\nT\n", x)),   # negative assertion
 ]
 
-pass = 0; fail = 0; loop = 0
+pass = 0; fail = 0; loop = 0; crash = 0
 println("\n=== Upstream verification ($(length(UPSTREAM_TESTS)) tests) ===\n")
 for (name, src, expected) in UPSTREAM_TESTS
-    r = mc_check(src, expected isa Function ? "." : expected)
+    local r
+    try
+        r = mc_check(src, expected isa Function ? "." : expected)
+    catch e
+        println("CRASH $name  ($(typeof(e)): $(sprint(showerror, e)))")
+        global crash += 1
+        continue
+    end
     if !r.terminated
         println("LOOP  $name  (hit $(r.steps)-step cap — infinite loop)")
         global loop += 1
@@ -103,7 +110,9 @@ for (name, src, expected) in UPSTREAM_TESTS
     end
 end
 
-println("\n$(pass) passed  $(fail) failed  $(loop) infinite-loops")
-println(loop > 0 ? "\n⚠ Infinite loops detected — check metta_calculus termination" : "")
-println(fail > 0 ? "\n⚠ Failures detected — output diverges from upstream" : "")
+println("\n$(pass) passed  $(fail) failed  $(loop) loops  $(crash) crashes")
+println(loop  > 0 ? "⚠ Infinite loops detected" : "")
+println(fail  > 0 ? "⚠ Output diverges from upstream" : "")
+println(crash > 0 ? "⚠ Crashes — unhandled errors in metta_calculus" : "")
+(pass == length(UPSTREAM_TESTS)) && println("✓ All upstream tests match")
 pass == length(UPSTREAM_TESTS) && println("\n✓ All upstream tests match")

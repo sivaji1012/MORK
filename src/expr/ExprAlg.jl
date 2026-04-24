@@ -226,13 +226,14 @@ function _expr_unify_core!(stack::Vector{Tuple{ExprEnv, ExprEnv}},
         xvar[1] != e.n && return false
         (_, found, _) = _ee_traverseh(
             (UInt8(e.v), false), e,
-            (h, o)       -> begin (cnt, f) = h; eq = (cnt == xvar[2]); ((cnt + UInt8(1), f || eq), nothing) end,
-            (h, o, r)    -> ((h[1], h[2] || r == xvar[2]), nothing),
-            (h, o, sl)   -> (h, nothing),
+            (h, o)       -> begin (cnt, f) = h; eq = (cnt == xvar[2]); ((cnt + UInt8(1), f || eq), f || eq) end,
+            (h, o, r)    -> begin b = h[2] || r == xvar[2]; ((h[1], b), b) end,
+            (h, o, sl)   -> (h, false),
             (h, o, a)    -> (h, false),
             (h, o, x, y) -> (h, x || y),
             (h, o, acc)  -> (h, acc))
-        return found[2]
+        # found may be nothing for leaf-only expressions — treat as false
+        found === nothing ? false : (found isa Tuple ? found[2] : found)::Bool
     end
 
     # is_unbound: follow variable chain, true if ultimately unbound

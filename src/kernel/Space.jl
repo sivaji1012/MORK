@@ -524,11 +524,9 @@ function space_metta_calculus!(s::Space, steps::Int=typemax(Int)) :: Int
         remove_val_at!(s.btm, full_path)
 
         rt = MORK.Expr(full_path)
-        @debug "metta_calculus" step=done+1 path_len=length(full_path) atoms=space_val_count(s)
         space_interpret!(s, rt)
         done += 1
     end
-    @debug "metta_calculus done" total_steps=done atoms=space_val_count(s)
     done
 end
 
