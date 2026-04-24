@@ -290,7 +290,7 @@ eliminate per-failed-unify allocations while preserving this contract.)
 Mirrors `Space::query_multi` in space.rs.
 """
 function space_query_multi(btm::PathMap{UnitVal}, pat_expr::MORK.Expr,
-                            effect::Function) :: Int
+                            pat_v::UInt8, effect::Function) :: Int
     pat_tag = byte_item(pat_expr.buf[1])
     pat_tag isa ExprArity || error("pat_expr must be an Arity node")
     n_factors = Int(pat_tag.arity)
@@ -301,25 +301,30 @@ function space_query_multi(btm::PathMap{UnitVal}, pat_expr::MORK.Expr,
         return 1
     end
 
-    # Scratch Dict allocated once per query; reused across unify attempts.
-    # On match: copied to a fresh Dict before calling effect (Option A).
     _bindings_scratch = Dict{ExprVar, ExprEnv}()
     _pairs_scratch    = Tuple{ExprEnv, ExprEnv}[]
 
-    _space_query_multi_inner!(btm, pat_expr, n_factors, effect,
+    _space_query_multi_inner!(btm, pat_expr, pat_v, n_factors, effect,
                                _bindings_scratch, _pairs_scratch)
 end
+
+# Compat wrapper with pat_v=0
+space_query_multi(btm::PathMap{UnitVal}, pat_expr::MORK.Expr, effect::Function) =
+    space_query_multi(btm, pat_expr, UInt8(0), effect)
 
 # Internal hot path — takes pre-allocated scratch buffers so the
 # per-unify-attempt Dict allocation is eliminated.
 function _space_query_multi_inner!(btm::PathMap{UnitVal},
                                     pat_expr::MORK.Expr,
+                                    pat_v::UInt8,
                                     n_factors::Int,
                                     effect::Function,
                                     bindings_scratch::Dict{ExprVar, ExprEnv},
                                     pairs_scratch::Vector{Tuple{ExprEnv, ExprEnv}}) :: Int
     pat_args = ExprEnv[]
-    ee0 = ExprEnv(UInt8(0), UInt8(0), UInt32(0), pat_expr)
+    # Use pat_v as starting variable count so VarRef indices in pattern
+    # match the binding keys expected by the template's expr_apply call.
+    ee0 = ExprEnv(UInt8(0), pat_v, UInt32(0), pat_expr)
     ee_args!(ee0, pat_args)
     sources = pat_args[2:end]
 
@@ -397,33 +402,27 @@ instead of `apply_e`.
 Returns `(touched, any_new)` where `touched` is match count and `any_new`
 indicates whether at least one new expression was added.
 """
-function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr,
-                                       tpl_expr::MORK.Expr,
+function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt8,
+                                       tpl_expr::MORK.Expr, tpl_v::UInt8,
                                        add_expr::MORK.Expr) :: Tuple{Int, Bool}
-    # Decompose tpl_expr into its template children
+    # Decompose tpl_expr into its template children, preserving per-item v offsets
     tpl_args = ExprEnv[]
-    ee_tpl = ExprEnv(UInt8(0), UInt8(0), UInt32(0), tpl_expr)
+    ee_tpl = ExprEnv(UInt8(0), tpl_v, UInt32(0), tpl_expr)
     ee_args!(ee_tpl, tpl_args)
-    templates = [ee.base.buf[Int(ee.offset)+1 : end] for ee in tpl_args[2:end]]
-
-    # In upstream Rust: add_expr is inserted into read_copy (a clone of btm used
-    # for querying only), NOT into btm itself. Writing it to btm would re-trigger
-    # metta_calculus on the next step, creating an infinite firing loop.
-    # Our simplified version skips the clone step and queries s.btm directly,
-    # so we must NOT re-insert add_expr. The exec rule is already consumed
-    # (removed) by space_metta_calculus! before interpret is called.
-    # Uncommenting the line below would reproduce the infinite-loop bug:
-    # set_val_at!(s.btm, collect(add_expr.buf), UNIT_VAL)
+    # Each tpl_args[i] carries the correct v (cumulative variable count up to that item)
+    template_ees = tpl_args[2:end]
 
     any_new  = Ref(false)
-    touched  = space_query_multi(s.btm, pat_expr, (bindings, loc_expr) -> begin
-        for tpl_bytes in templates
-            # Apply bindings to template
+    # Pass pat_v so query uses correct variable start index for the pattern
+    touched  = space_query_multi(s.btm, pat_expr, pat_v, (bindings, loc_expr) -> begin
+        for ee in template_ees
+            tpl_bytes = ee.base.buf[Int(ee.offset)+1 : end]
             tpl_e = MORK.Expr(Vector{UInt8}(tpl_bytes))
             out_buf = Vector{UInt8}(undef, max(length(tpl_bytes) * 4, 64))
             ez  = ExprZipper(tpl_e, 1)
             oz  = ExprZipper(MORK.Expr(out_buf), 1)
-            expr_apply(UInt8(0), UInt8(0), UInt8(0), ez, bindings, oz,
+            # Use ee.v as original_intros so VarRef indices match binding keys
+            expr_apply(UInt8(0), ee.v, UInt8(0), ez, bindings, oz,
                        Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
             result_bytes = oz.root.buf[1:oz.loc-1]
             old = get_val_at(s.btm, result_bytes)
@@ -435,6 +434,11 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr,
 
     (touched, any_new[])
 end
+
+# Compat wrapper for callers without v parameters (v defaults to 0)
+space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, tpl_expr::MORK.Expr,
+                              add_expr::MORK.Expr) =
+    space_transform_multi_multi!(s, pat_expr, UInt8(0), tpl_expr, UInt8(0), add_expr)
 
 # =====================================================================
 # space_interpret! / space_metta_calculus! — rule evaluation engine
@@ -495,7 +499,8 @@ function space_interpret!(s::Space, rt::MORK.Expr) :: Bool
     pat_expr = MORK.Expr(pat_buf[pat_off+1 : end])
     tpl_expr = MORK.Expr(tpl_buf[tpl_off+1 : end])
 
-    space_transform_multi_multi!(s, pat_expr, tpl_expr, rt)
+    # Pass v fields so variable indices stay consistent across pattern/template
+    space_transform_multi_multi!(s, pat_expr, pat_ee.v, tpl_expr, tpl_ee.v, rt)
     true
 end
 

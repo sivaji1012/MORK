@@ -3418,9 +3418,9 @@ using MORK
             s2 = expr_serialize(UInt8[0x81])
             @test s2 == "_2"
 
-            # Arity-0 leaf
+            # Arity-0 leaf → empty s-expression
             s3 = expr_serialize(UInt8[0x00])
-            @test s3 == "[0]"
+            @test s3 == "()"
 
             # Symbol "hi"
             s4 = expr_serialize(UInt8[0xC2, UInt8('h'), UInt8('i')])
@@ -3776,10 +3776,14 @@ using MORK
 
     @testset "metta_calculus integration (ports main.rs)" begin
 
-        function _mc(src::String, steps::Int=1_000_000)
+        STEP_CAP = 100_000  # hitting this exactly = infinite loop bug
+
+        # Returns (result, steps). Asserts steps < STEP_CAP to catch infinite loops.
+        function _mc(src::String, cap::Int=STEP_CAP)
             s = new_space()
             space_add_all_sexpr!(s, src)
-            space_metta_calculus!(s, steps)
+            steps = space_metta_calculus!(s, cap)
+            @test steps < cap  # steps == cap means we hit the limit → infinite loop
             space_dump_all_sexpr(s)
         end
 
