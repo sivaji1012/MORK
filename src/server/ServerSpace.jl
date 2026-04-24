@@ -212,11 +212,23 @@ end
 const SETTLE_TIME_S = 0.005   # 5ms settle time from upstream
 
 mutable struct ServerSpace
-    space      ::Space
-    status_map ::StatusMap
+    space          ::Space
+    status_map     ::StatusMap
+    resource_store ::ResourceStore
+    _next_cmd_id   ::Ref{UInt64}   # monotonic command-ID counter
 end
 
-ServerSpace() = ServerSpace(new_space(), StatusMap())
+function ServerSpace(resource_dir::AbstractString=".")
+    mkpath(resource_dir)
+    ServerSpace(new_space(), StatusMap(), ResourceStore(resource_dir), Ref(UInt64(0)))
+end
+
+# Thread-safe command-ID allocation
+function _ss_next_cmd_id!(ss::ServerSpace) :: UInt64
+    id = ss._next_cmd_id[]
+    ss._next_cmd_id[] = id + one(UInt64)
+    id
+end
 
 function ss_get_status(ss::ServerSpace, path::Vector{UInt8}) :: StatusRecord
     sm_get_status(ss.status_map, path)

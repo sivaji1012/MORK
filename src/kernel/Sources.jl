@@ -112,7 +112,7 @@ end
     ACTSource
 
 Reads from an ArenaCompactTree memory-mapped file.
-Mirrors `ACTSource` in sources.rs.  NOT YET PORTED — stubs throw.
+Mirrors `ACTSource` in sources.rs.
 """
 struct ACTSource
     expr ::MORK.Expr
@@ -121,8 +121,40 @@ end
 
 source_requests(s::ACTSource) = [ResourceRequest(RREQ_ACT, s.act)]
 
+# 2-arg fallback (no mmaps cache) — opens the file fresh every call
 source_factor(s::ACTSource, btm::PathMap{UnitVal}) =
-    error("ACTSource not yet ported")
+    source_factor(s, btm, Dict{String,ArenaCompactTree}())
+
+"""
+    source_factor(s::ACTSource, btm, mmaps) → PrefixZipper{ACTZipper}
+
+Open (or reuse from cache) the `.act` file named `s.act` and return a
+PrefixZipper wrapping its read zipper.  Mirrors `ACTSource::source` in sources.rs.
+
+ACT_PATH constant mirrors the upstream `const ACT_PATH` (default ".").
+"""
+const ACT_PATH = Ref{String}(".")
+
+function source_factor(s::ACTSource, btm::PathMap{UnitVal}, mmaps::Dict{String,ArenaCompactTree})
+    # Build prefix: [3] ACT <symbol_size_byte> <name_bytes>
+    # Mirrors CONSTANT_PREFIX + name encoding in ACTSource::source.
+    name   = s.act
+    prefix = UInt8[
+        item_byte(ExprArity(UInt8(3))),
+        item_byte(ExprSymbol(UInt8(3))),
+        UInt8('A'), UInt8('C'), UInt8('T'),
+        item_byte(ExprSymbol(UInt8(length(name)))),
+    ]
+    append!(prefix, codeunits(name))
+
+    # Open or reuse ACT file
+    tree = get!(mmaps, name) do
+        path = joinpath(ACT_PATH[], name * ".act")
+        act_open_mmap(path)
+    end
+    rz = ACTZipper(tree)
+    PrefixZipper(prefix, rz)
+end
 
 # ── CmpSource (equality / inequality comparison) ──────────────────────
 

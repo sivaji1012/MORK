@@ -81,13 +81,14 @@ mutable struct Space
     btm    ::PathMap{UnitVal, GlobalAlloc}
     sm     ::SharedMappingHandle
     timing ::Bool
+    mmaps  ::Dict{String, ArenaCompactTree}   # ACT file cache (mirrors mmaps in Space)
 end
 
 """    new_space() → Space
 
 Create an empty Space.  Mirrors `Space::new`.
 """
-new_space() = Space(PathMap{UnitVal}(), SharedMappingHandle(), false)
+new_space() = Space(PathMap{UnitVal}(), SharedMappingHandle(), false, Dict{String,ArenaCompactTree}())
 
 """    space_val_count(s) → Int
 
@@ -327,7 +328,8 @@ space_query_multi(btm::PathMap{UnitVal}, pat_expr::MORK.Expr, effect::Function) 
 # =====================================================================
 
 function space_query_multi_i(btm::PathMap{UnitVal}, pat_expr::MORK.Expr,
-                               pat_v::UInt8, effect::Function) :: Int
+                               pat_v::UInt8, effect::Function;
+                               mmaps::Dict{String,ArenaCompactTree}=Dict{String,ArenaCompactTree}()) :: Int
     pat_tag = byte_item(pat_expr.buf[1])
     pat_tag isa ExprArity || return 0
     n_factors = Int(pat_tag.arity)
@@ -348,7 +350,9 @@ function space_query_multi_i(btm::PathMap{UnitVal}, pat_expr::MORK.Expr,
         span = expr_span(ee.base, Int(ee.offset) + 1)
         sub  = MORK.Expr(Vector{UInt8}(span))
         src  = asource_new(sub)
-        push!(factors, source_factor(src, btm))
+        # ACTSource uses mmaps cache; all others ignore it
+        factor = src isa ACTSource ? source_factor(src, btm, mmaps) : source_factor(src, btm)
+        push!(factors, factor)
     end
 
     # primary = factors[1], secondaries = factors[2:end]
@@ -496,6 +500,12 @@ end
 space_query_multi(s::Space, pat::MORK.Expr, f::Function) =
     space_query_multi(s.btm, pat, f)
 
+# Space-level overloads that pass mmaps for ACT file caching
+space_query_multi_i(s::Space, pat::MORK.Expr, f::Function) =
+    space_query_multi_i(s.btm, pat, UInt8(0), f; mmaps=s.mmaps)
+space_query_multi_i(s::Space, pat::MORK.Expr, pat_v::UInt8, f::Function) =
+    space_query_multi_i(s.btm, pat, pat_v, f; mmaps=s.mmaps)
+
 # =====================================================================
 # space_transform_multi_multi! — rewrite rule application
 # =====================================================================
@@ -530,7 +540,9 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
     template_ees = tpl_args[2:end]
 
     any_new  = Ref(false)
-    query_fn = no_source ? space_query_multi : space_query_multi_i
+    # space_query_multi_i uses s.mmaps for ACT file caching (I-pattern)
+    query_fn = no_source ? space_query_multi :
+                           (btm, pat, v, f) -> space_query_multi_i(btm, pat, v, f; mmaps=s.mmaps)
     touched  = query_fn(s.btm, pat_expr, pat_v, (bindings, loc_expr) -> begin
         if no_sink
             # `,` template functor — apply each template and insert result directly

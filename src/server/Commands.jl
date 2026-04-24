@@ -299,12 +299,12 @@ end
 # =====================================================================
 function cmd_import(ss::ServerSpace, args::Vector{String}, props::Dict{String,String}, body::Vector{UInt8})
     length(args) < 2 && return work_error(400, "import: expected pattern and template")
-    pat_str  = args[1]
-    tpl_str  = args[2]
-    uri      = get(props, "uri", "")
+    pat_str = args[1]
+    tpl_str = args[2]
+    uri     = get(props, "uri", "")
     isempty(uri) && return work_error(400, "import: missing uri property")
-    fmt_str  = get(props, "format", "metta")
-    fmt      = dataformat_from_str(fmt_str)
+    fmt_str = get(props, "format", "metta")
+    fmt     = dataformat_from_str(fmt_str)
     fmt === nothing && return work_error(400, "import: unrecognized format '$fmt_str'")
 
     try
@@ -313,22 +313,37 @@ function cmd_import(ss::ServerSpace, args::Vector{String}, props::Dict{String,St
         writer = ss_new_writer(ss, UInt8[])
         writer === nothing && return work_error(503, "import: space is locked for writing")
 
+        # Allocate a ResourceHandle to track the in-progress download on disk.
+        # Mirrors ctx.0.resource_store.new_resource(file_uri, cmd.cmd_id) in commands.rs.
+        cmd_id      = _ss_next_cmd_id!(ss)
+        file_handle = rs_new_resource(ss.resource_store, uri, cmd_id)
+
         Threads.@spawn begin
             try
                 resp = HTTP.get(uri)
                 data = resp.body
-                if fmt == FMT_METTA
-                    n = space_add_sexpr!(ss.space, data, pat, tpl)
-                    ss_set_status!(ss, UInt8[], StatusRecord(STATUS_COUNT_RESULT, string(n), n))
+
+                # Stream to disk via the ResourceHandle, then read back.
+                # Mirrors do_import's BufWriter → file_resource.path() pattern.
+                write(rh_path(file_handle), data)
+
+                n = if fmt == FMT_METTA
+                    space_add_sexpr!(ss.space, data, pat, tpl)
                 elseif fmt == FMT_CSV
-                    n = space_load_csv!(ss.space, data, pat, tpl)
-                    ss_set_status!(ss, UInt8[], StatusRecord(STATUS_COUNT_RESULT, string(n), n))
+                    space_load_csv!(ss.space, data, pat, tpl)
                 elseif fmt == FMT_JSON
-                    n = space_load_json!(ss.space, data)
-                    ss_set_status!(ss, UInt8[], StatusRecord(STATUS_COUNT_RESULT, string(n), n))
+                    space_load_json!(ss.space, data)
+                else
+                    0
                 end
+
+                ss_set_status!(ss, UInt8[], StatusRecord(STATUS_COUNT_RESULT, string(n), n))
+                # Finalize resource: rename in-progress file with real timestamp.
+                rh_finalize!(file_handle, UInt64(time_ns()))
+
             catch e
                 ss_set_status!(ss, UInt8[], StatusRecord(STATUS_FETCH_ERROR, string(e)))
+                close(file_handle)   # cleanup in-progress file on error
             finally
                 ss_release_writer!(ss, writer)
             end
