@@ -122,28 +122,25 @@ sink_finalize!(s::AddSink, ::PathMap{UnitVal}) :: Bool = s.changed
 Collect paths to remove, then subtract them from BTM on finalize.
 Mirrors `RemoveSink` in sinks.rs.
 """
+# Upstream: collects paths into an internal PathMap, then calls wz.subtract_into
+# on finalize — one trie-level operation instead of N individual removes.
 mutable struct RemoveSink <: AbstractSink
-    expr    ::MORK.Expr
-    to_remove::Vector{Vector{UInt8}}
+    expr   ::MORK.Expr
+    remove ::PathMap{UnitVal}
 end
 
-RemoveSink(e::MORK.Expr) = RemoveSink(e, Vector{UInt8}[])
+RemoveSink(e::MORK.Expr) = RemoveSink(e, PathMap{UnitVal}())
 
 function sink_apply!(s::RemoveSink, bindings::Dict{ExprVar,ExprEnv},
                      path::Vector{UInt8}, btm::PathMap{UnitVal})
     length(path) > 3 || return
-    push!(s.to_remove, path[4:end])
+    set_val_at!(s.remove, path[4:end], UNIT_VAL)
 end
 
 function sink_finalize!(s::RemoveSink, btm::PathMap{UnitVal}) :: Bool
-    changed = false
-    for p in s.to_remove
-        wz = write_zipper(btm)
-        wz_descend_to!(wz, p)
-        v = wz_remove_val!(wz, true)
-        v !== nothing && (changed = true)
-    end
-    changed
+    wz = write_zipper(btm)
+    status = wz_subtract_into!(wz, s.remove.root)
+    status != ALG_STATUS_IDENTITY
 end
 
 # =====================================================================
@@ -156,55 +153,65 @@ end
 Keep at most `max` lexicographically smallest paths.
 Mirrors `HeadSink` in sinks.rs.
 """
+# Upstream: collects paths into an internal PathMap (not Vector).
+# top tracks the lexicographically largest path in head (for O(1) displacement check).
+# finalize uses wz_join_into! (one trie-level merge instead of N individual inserts).
 mutable struct HeadSink <: AbstractSink
-    expr    ::MORK.Expr
-    head    ::Vector{Vector{UInt8}}   # collected paths
-    skip    ::Int                     # bytes to skip in each matched path
-    max     ::Int
+    expr  ::MORK.Expr
+    head  ::PathMap{UnitVal}  # collected paths — mirrors upstream PathMap<()>
+    skip  ::Int
+    count ::Int
+    max   ::Int
+    top   ::Vector{UInt8}     # largest path in head (mirrors upstream top: Vec<u8>)
 end
 
 function HeadSink(e::MORK.Expr)
     buf = e.buf
-    # Expect [3] head <num_symbol> <pattern>
-    # skip = 1 (arity) + 1+4 (head symbol) + 1+len(num) bytes
-    # parse max from the third child
-    skip = 6   # [3] head = 6 bytes minimum; runtime parsing below
-    if length(buf) >= 7 && byte_item(buf[1]) isa ExprArity
-        # buf[1]=Arity(3), buf[2]=SymbolSize(4), buf[3..6]='head', buf[7]=num symbol
-        if length(buf) >= 8
-            num_tag = byte_item(buf[7])
-            if num_tag isa ExprSymbol
-                num_str = String(buf[8 : 7 + Int(num_tag.size)])
-                max_n   = tryparse(Int, num_str)
-                skip    = 1 + 1 + 4 + 1 + Int(num_tag.size)  # arity+head_sym+num_sym
-                max_n !== nothing && return HeadSink(e, Vector{UInt8}[], skip, max_n)
+    skip = 6
+    max_n = 10
+    if length(buf) >= 8 && byte_item(buf[1]) isa ExprArity
+        num_tag = byte_item(buf[7])
+        if num_tag isa ExprSymbol
+            num_str = String(buf[8 : 7 + Int(num_tag.size)])
+            parsed  = tryparse(Int, num_str)
+            if parsed !== nothing
+                skip  = 1 + 1 + 4 + 1 + Int(num_tag.size)
+                max_n = parsed
             end
         end
     end
-    HeadSink(e, Vector{UInt8}[], skip, 10)  # default max=10
+    HeadSink(e, PathMap{UnitVal}(), skip, 0, max_n, UInt8[])
 end
 
 function sink_apply!(s::HeadSink, bindings::Dict{ExprVar,ExprEnv},
                      path::Vector{UInt8}, btm::PathMap{UnitVal})
     length(path) <= s.skip && return
     mpath = path[s.skip+1:end]
-    if length(s.head) < s.max
-        push!(s.head, mpath)
-        sort!(s.head)
-    elseif mpath < s.head[end]
-        s.head[end] = mpath
-        sort!(s.head)
+    if s.count == s.max
+        # At capacity: only accept if mpath < top (displaces current largest)
+        if mpath >= s.top
+            return  # doesn't displace
+        end
+        set_val_at!(s.head, mpath, UNIT_VAL)
+        remove_val_at!(s.head, s.top)
+        # find new top: descend to last path in head trie
+        rz = read_zipper(s.head)
+        zipper_descend_last_path!(rz)
+        s.top = collect(zipper_path(rz))
+    else
+        if set_val_at!(s.head, mpath, UNIT_VAL) === nothing  # newly inserted
+            s.count += 1
+            if isempty(s.top) || mpath > s.top
+                s.top = copy(mpath)
+            end
+        end
     end
 end
 
 function sink_finalize!(s::HeadSink, btm::PathMap{UnitVal}) :: Bool
-    changed = false
-    for p in s.head
-        old = get_val_at(btm, p)
-        set_val_at!(btm, p, UNIT_VAL)
-        old === nothing && (changed = true)
-    end
-    changed
+    wz = write_zipper(btm)
+    status = wz_join_into!(wz, s.head.root)
+    status != ALG_STATUS_IDENTITY
 end
 
 # =====================================================================

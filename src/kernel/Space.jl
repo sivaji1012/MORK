@@ -411,42 +411,25 @@ instead of `apply_e`.
 Returns `(touched, any_new)` where `touched` is match count and `any_new`
 indicates whether at least one new expression was added.
 """
+# Mirrors transform_multi_multi_io(pat_expr, tpl_expr, add, no_source, no_sink)
+# no_source=true  → pattern is `,`  (query the trie)
+# no_source=false → pattern is `I`  (query external source — not yet supported, falls back to trie)
+# no_sink=true    → template is `,` (direct set_val_at!)
+# no_sink=false   → template is `O` (dispatch through sink machinery)
 function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt8,
                                        tpl_expr::MORK.Expr, tpl_v::UInt8,
-                                       add_expr::MORK.Expr) :: Tuple{Int, Bool}
+                                       add_expr::MORK.Expr;
+                                       no_source::Bool=true,
+                                       no_sink::Bool=true) :: Tuple{Int, Bool}
     tpl_args = ExprEnv[]
     ee_tpl = ExprEnv(UInt8(0), tpl_v, UInt32(0), tpl_expr)
     ee_args!(ee_tpl, tpl_args)
     template_ees = tpl_args[2:end]
 
-    # Detect O functor: (O sink1 sink2 ...) → use sink machinery instead of set_val_at!
-    use_sinks = length(tpl_expr.buf) >= 2 &&
-                byte_item(tpl_expr.buf[1]) isa ExprArity &&
-                byte_item(tpl_expr.buf[2]) isa ExprSymbol &&
-                (byte_item(tpl_expr.buf[2])::ExprSymbol).size == 1 &&
-                length(tpl_expr.buf) >= 3 && tpl_expr.buf[3] == UInt8('O')
-
     any_new = Ref(false)
     touched = space_query_multi(s.btm, pat_expr, pat_v, (bindings, loc_expr) -> begin
-        if use_sinks
-            # O functor: each template item is a sink descriptor
-            for ee in template_ees
-                # Use expr_span to truncate to just this sub-expression (not siblings)
-                tpl_span = expr_span(ee.base, Int(ee.offset) + 1)
-                tpl_e = MORK.Expr(Vector{UInt8}(tpl_span))
-                out_buf = Vector{UInt8}(undef, max(length(tpl_span) * 4, 64))
-                ez = ExprZipper(tpl_e, 1)
-                oz = ExprZipper(MORK.Expr(out_buf), 1)
-                expr_apply(UInt8(0), ee.v, UInt8(0), ez, bindings, oz,
-                           Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
-                result_expr = MORK.Expr(oz.root.buf[1:oz.loc-1])
-                sink = asink_new(result_expr)
-                sink_apply!(sink, bindings, result_expr.buf, s.btm)
-                changed = sink_finalize!(sink, s.btm)
-                changed && (any_new[] = true)
-            end
-        else
-            # , functor: each template item is a value to add
+        if no_sink
+            # `,` template functor — apply each template and insert result directly
             for ee in template_ees
                 tpl_span = expr_span(ee.base, Int(ee.offset) + 1)
                 tpl_e = MORK.Expr(Vector{UInt8}(tpl_span))
@@ -459,6 +442,22 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
                 old = get_val_at(s.btm, result_bytes)
                 set_val_at!(s.btm, result_bytes, UNIT_VAL)
                 old === nothing && (any_new[] = true)
+            end
+        else
+            # `O` template functor — apply each template then dispatch to sink
+            for ee in template_ees
+                tpl_span = expr_span(ee.base, Int(ee.offset) + 1)
+                tpl_e = MORK.Expr(Vector{UInt8}(tpl_span))
+                out_buf = Vector{UInt8}(undef, max(length(tpl_span) * 4, 64))
+                ez = ExprZipper(tpl_e, 1)
+                oz = ExprZipper(MORK.Expr(out_buf), 1)
+                expr_apply(UInt8(0), ee.v, UInt8(0), ez, bindings, oz,
+                           Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
+                result_expr = MORK.Expr(oz.root.buf[1:oz.loc-1])
+                sink = asink_new(result_expr)
+                sink_apply!(sink, bindings, result_expr.buf, s.btm)
+                changed = sink_finalize!(sink, s.btm)
+                changed && (any_new[] = true)
             end
         end
         true
@@ -531,8 +530,24 @@ function space_interpret!(s::Space, rt::MORK.Expr) :: Bool
     pat_expr = MORK.Expr(pat_buf[pat_off+1 : end])
     tpl_expr = MORK.Expr(tpl_buf[tpl_off+1 : end])
 
-    # Pass v fields so variable indices stay consistent across pattern/template
-    space_transform_multi_multi!(s, pat_expr, pat_ee.v, tpl_expr, tpl_ee.v, rt)
+    # Read functor byte: pat[offset+3] is the single-char functor (`,` or `I`)
+    # tpl[offset+3] is the single-char functor (`,` or `O`)
+    # Mirrors upstream: match (*pat_expr.ptr.add(2), *tpl_expr.ptr.add(2))
+    pat_functor = pat_buf[pat_off + 3]
+    tpl_functor = tpl_buf[tpl_off + 3]
+
+    no_source = (pat_functor == UInt8(','))
+    no_sink   = (tpl_functor == UInt8(','))
+
+    if !no_source && pat_functor != UInt8('I')
+        return false  # invalid pattern functor
+    end
+    if !no_sink && tpl_functor != UInt8('O')
+        return false  # invalid template functor
+    end
+
+    space_transform_multi_multi!(s, pat_expr, pat_ee.v, tpl_expr, tpl_ee.v, rt;
+                                  no_source=no_source, no_sink=no_sink)
     true
 end
 
