@@ -63,9 +63,13 @@ include("nodes/BridgeNode.jl")
 
 # ── Zipper / cursor layer ─────────────────────────────────────────────────────
 
-# Read zipper + PathMap container.
-# Ports pathmap/src/zipper.rs + pathmap/src/trie_map.rs.
+# Read zipper.
+# Ports pathmap/src/zipper.rs.
 include("zipper/Zipper.jl")
+
+# PathMap — byte-slice-keyed trie map container + lattice ops.
+# Ports pathmap/src/trie_map.rs (extracted from Zipper.jl).
+include("pathmap/PathMap.jl")
 
 # Write zipper — mutable cursor with set_val!, remove_val!, navigation.
 # Ports pathmap/src/write_zipper.rs.
