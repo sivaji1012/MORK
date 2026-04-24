@@ -27,6 +27,7 @@ include("interning/Interning.jl")
 
 # Frontend parsers: MeTTa sexpr + JSON. Ports mork/frontend/src/.
 include("frontend/Frontend.jl")
+include("frontend/HEParser.jl")
 
 # Kernel: query source abstraction (BTM/ACT/Z3/CmpSource).
 # Ports mork/kernel/src/sources.rs.
