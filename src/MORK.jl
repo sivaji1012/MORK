@@ -23,6 +23,8 @@ Upstream references:
 """
 module MORK
 
+using Base64
+
 # ── Core algebraic primitives ─────────────────────────────────────────────────
 
 # Allocator shim (`Allocator` + `GlobalAlloc`). Ports pathmap/src/alloc.rs.
