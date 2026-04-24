@@ -412,8 +412,10 @@ Returns `(touched, any_new)` where `touched` is match count and `any_new`
 indicates whether at least one new expression was added.
 """
 # Mirrors transform_multi_multi_io(pat_expr, tpl_expr, add, no_source, no_sink)
-# no_source=true  → pattern is `,`  (query the trie)
-# no_source=false → pattern is `I`  (query external source — not yet supported, falls back to trie)
+# no_source=true  → pattern is `,`  (query the trie — compat path)
+# no_source=false → pattern is `I`  (external ACT/Z3 source via query_multi_i;
+#                                    not ported — requires mmaps/z3s infrastructure.
+#                                    Falls back to trie query for now.)
 # no_sink=true    → template is `,` (direct set_val_at!)
 # no_sink=false   → template is `O` (dispatch through sink machinery)
 function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt8,
@@ -578,6 +580,111 @@ function space_metta_calculus!(s::Space, steps::Int=typemax(Int)) :: Int
 end
 
 # =====================================================================
+# prefix_subsumption — group prefixes by longest shared prefix
+# Mirrors Space::prefix_subsumption in space.rs (line 1278)
+# =====================================================================
+
+function space_prefix_subsumption(prefixes::Vector{Vector{UInt8}}) :: Vector{Int}
+    n   = length(prefixes)
+    out = Vector{Int}(undef, n)
+    for i in 1:n
+        cur      = prefixes[i]
+        best_idx = i
+        best_len = length(cur)
+        for j in 1:n
+            cand = prefixes[j]
+            # cand is a prefix of cur iff cand == cur[1:length(cand)]
+            cl = length(cand)
+            if cl <= length(cur) && cur[1:cl] == cand
+                if cl < best_len || (cl == best_len && j < best_idx)
+                    best_idx = j
+                    best_len = cl
+                end
+            end
+        end
+        out[i] = best_idx
+    end
+    out
+end
+
+# =====================================================================
+# space_token_bfs — BFS from token prefix, return unifiable matches
+# Mirrors Space::token_bfs in space.rs (line 1750)
+# =====================================================================
+
+function space_token_bfs(s::Space, token::Vector{UInt8}, pattern::MORK.Expr) :: Vector{Tuple{Vector{UInt8}, MORK.Expr}}
+    rz  = read_zipper_at_path(s.btm, token)
+    zipper_descend_until!(rz)
+    res = Tuple{Vector{UInt8}, MORK.Expr}[]
+    cm  = zipper_child_mask(rz)
+    for b in cm
+        zipper_descend_to_byte!(rz, b)
+        # Clone zipper, advance to first value to get origin path
+        rzc = deepcopy(rz)
+        zipper_to_next_val!(rzc)
+        # origin_path = prefix_buf[1:origin_path_len]
+        origin = rzc.prefix_buf[1:rzc.origin_path_len]
+        e = MORK.Expr(copy(origin))
+        # expr_unifiable: attempt unification, return true if succeeds
+        pairs = Tuple{ExprEnv,ExprEnv}[
+            (ExprEnv(UInt8(0), UInt8(0), UInt32(0), e),
+             ExprEnv(UInt8(1), UInt8(0), UInt32(0), pattern))
+        ]
+        scratch = Dict{ExprVar,ExprEnv}()
+        if _expr_unify_inplace!(pairs, scratch) === true
+            push!(res, (copy(rz.prefix_buf[1:rz.origin_path_len + length(zipper_path(rz))]), e))
+        end
+        zipper_ascend_byte!(rz)
+    end
+    res
+end
+
+# =====================================================================
+# space_load_csv! — load CSV rows as expressions via pattern/template
+# Mirrors Space::load_csv in space.rs (line 509)
+# =====================================================================
+
+function space_load_csv!(s::Space, src, pattern::MORK.Expr, template::MORK.Expr,
+                          separator::UInt8=UInt8(',')) :: Int
+    bytes = src isa Vector{UInt8} ? src : Vector{UInt8}(src)
+    count = 0
+    for (i, line) in enumerate(split(String(bytes), '\n'))
+        isempty(line) && continue
+        fields = split(line, Char(separator))
+        # Build expr: (arity+1 row_index field1 field2 ...)
+        # row_index = i-1 as decimal string symbol, matching Rust i.to_string()
+        row_sym  = string(i - 1)
+        parts    = vcat([row_sym], String.(fields))
+        arity    = length(parts)
+        buf      = UInt8[]
+        push!(buf, item_byte(ExprArity(UInt8(arity))))
+        for p in parts
+            pb = Vector{UInt8}(p)
+            push!(buf, item_byte(ExprSymbol(UInt8(length(pb)))))
+            append!(buf, pb)
+        end
+        data_expr = MORK.Expr(buf)
+
+        # Unify with pattern, apply template
+        bindings = Dict{ExprVar,ExprEnv}()
+        pairs    = Tuple{ExprEnv,ExprEnv}[
+            (ExprEnv(UInt8(0), UInt8(0), UInt32(0), pattern),
+             ExprEnv(UInt8(1), UInt8(0), UInt32(0), data_expr))
+        ]
+        _expr_unify_inplace!(pairs, bindings) === true || continue
+
+        out_buf = Vector{UInt8}(undef, max(length(template.buf) * 4, 256))
+        ez_tpl  = ExprZipper(template, 1)
+        oz      = ExprZipper(MORK.Expr(out_buf), 1)
+        expr_apply(UInt8(0), UInt8(0), UInt8(0), ez_tpl, bindings, oz,
+                   Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
+        set_val_at!(s.btm, oz.root.buf[1:oz.loc-1], UNIT_VAL)
+        count += 1
+    end
+    count
+end
+
+# =====================================================================
 # space_add_sexpr! / space_remove_sexpr! — pattern+template variants
 # Mirrors Space::add_sexpr / remove_sexpr / load_sexpr_impl in space.rs
 # =====================================================================
@@ -698,6 +805,7 @@ export space_dump_all_sexpr, space_dump_sexpr, space_load_json!
 export space_backup_tree, space_restore_tree!
 export space_backup_paths, space_restore_paths!
 export space_backup_symbols, space_restore_symbols!
+export space_prefix_subsumption, space_token_bfs, space_load_csv!
 export BreakQuery, space_query_multi, _space_query_multi_inner!
 export space_transform_multi_multi!
 export space_interpret!, space_metta_calculus!
