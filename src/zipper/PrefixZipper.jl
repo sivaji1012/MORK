@@ -328,6 +328,29 @@ function pz_to_prev_sibling_byte!(pz::PrefixZipper)
     true
 end
 
+# ZipperIteration default impl — mirrors the Rust default in zipper.rs
+function pz_to_next_val!(pz::PrefixZipper)
+    iters = 0
+    while true
+        iters += 1; iters > 200_000 && return false
+        if pz_descend_first_byte!(pz)
+            pz_is_val(pz) && return true
+            pz_descend_until!(pz) && pz_is_val(pz) && return true
+        else
+            ascending = true
+            while ascending
+                if pz_to_next_sibling_byte!(pz)
+                    pz_is_val(pz) && return true
+                    ascending = false
+                else
+                    pz_ascend_byte!(pz) || return false
+                    pz_at_root(pz)      && return false
+                end
+            end
+        end
+    end
+end
+
 # =====================================================================
 # ZipperAbsolutePath
 # =====================================================================
@@ -357,5 +380,5 @@ export pz_path, pz_val_count, pz_at_root
 export pz_reset!, pz_descend_to!, pz_descend_to_byte!, pz_descend_indexed_byte!
 export pz_descend_first_byte!, pz_descend_until!, pz_descend_to_existing!
 export pz_ascend!, pz_ascend_byte!, pz_ascend_until!, pz_ascend_until_branch!
-export pz_to_next_sibling_byte!, pz_to_prev_sibling_byte!
+export pz_to_next_sibling_byte!, pz_to_prev_sibling_byte!, pz_to_next_val!
 export pz_origin_path, pz_root_prefix_path, pz_prefix_path_below_focus

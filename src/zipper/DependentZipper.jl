@@ -162,6 +162,26 @@ dpz_path_indices(dpz::DependentZipper) = dpz.factor_paths
 # ZipperMoving
 # =====================================================================
 
+# Generic dispatch aliases so DependentZipper works wherever ReadZipperCore is expected
+zipper_reset!(dpz::DependentZipper)               = dpz_reset!(dpz)
+zipper_path(dpz::DependentZipper)                 = dpz_path(dpz)
+zipper_path_exists(dpz::DependentZipper)          = dpz_path_exists(dpz)
+zipper_is_val(dpz::DependentZipper)               = dpz_is_val(dpz)
+zipper_child_count(dpz::DependentZipper)          = dpz_child_count(dpz)
+zipper_child_mask(dpz::DependentZipper)           = dpz_child_mask(dpz)
+zipper_at_root(dpz::DependentZipper)              = dpz_at_root(dpz)
+zipper_descend_to_byte!(dpz::DependentZipper, b)  = dpz_descend_to_byte!(dpz, b)
+zipper_descend_to!(dpz::DependentZipper, p)       = dpz_descend_to!(dpz, p)
+zipper_descend_to_existing!(dpz::DependentZipper, p) = dpz_descend_to_existing!(dpz, p)
+zipper_descend_first_byte!(dpz::DependentZipper)  = dpz_descend_first_byte!(dpz)
+zipper_descend_until!(dpz::DependentZipper)       = dpz_descend_until!(dpz)
+zipper_ascend!(dpz::DependentZipper, n::Int)      = dpz_ascend!(dpz, n)
+zipper_ascend_byte!(dpz::DependentZipper)         = dpz_ascend_byte!(dpz)
+zipper_ascend_until!(dpz::DependentZipper)        = dpz_ascend_until!(dpz)
+zipper_ascend_until_branch!(dpz::DependentZipper) = dpz_ascend_until_branch!(dpz)
+zipper_to_next_sibling_byte!(dpz::DependentZipper) = dpz_to_next_sibling_byte!(dpz)
+zipper_to_next_val!(dpz::DependentZipper)         = dpz_to_next_val!(dpz)
+
 function dpz_reset!(dpz::DependentZipper)
     empty!(dpz.factor_paths)
     for sz in dpz.secondary; sz isa ReadZipperCore && zipper_reset!(sz); end

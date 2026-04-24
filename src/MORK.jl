@@ -109,6 +109,10 @@ include("zipper/EmptyZipper.jl")
 # Ports pathmap/src/dependent_zipper.rs.
 include("zipper/DependentZipper.jl")
 
+# ProductZipperG — generic product zipper (any zipper type as factors).
+# Ports pathmap/src/product_zipper.rs ProductZipperG.
+include("zipper/ProductZipperG.jl")
+
 # ── PathMap algorithmic layer ─────────────────────────────────────────────────
 
 # Morphisms — catamorphism/anamorphism fold machinery over tries.

@@ -312,6 +312,107 @@ end
 space_query_multi(btm::PathMap{UnitVal}, pat_expr::MORK.Expr, effect::Function) =
     space_query_multi(btm, pat_expr, UInt8(0), effect)
 
+# =====================================================================
+# space_query_multi_i — I-pattern query using ASource dispatch
+# Mirrors Space::query_multi_i (no_source=false path) in space.rs.
+#
+# For each argument of the I-pattern, calls asource_new() to dispatch:
+#   CompatSource / BTMSource → plain read zipper (same as comma pattern)
+#   CmpSource (== / !=)      → PrefixZipper<DependentZipper> via source_factor
+#
+# All factors are combined in a ProductZipperG, then iterated like
+# query_multi_raw: focus must be on the last factor before yielding.
+# origin_path (including any prefix from CmpSource) is used as the
+# expression for unification, with factor_paths adjusted by prefix length.
+# =====================================================================
+
+function space_query_multi_i(btm::PathMap{UnitVal}, pat_expr::MORK.Expr,
+                               pat_v::UInt8, effect::Function) :: Int
+    pat_tag = byte_item(pat_expr.buf[1])
+    pat_tag isa ExprArity || return 0
+    n_factors = Int(pat_tag.arity)
+    n_factors > 0 || return 0
+
+    if n_factors == 1
+        effect(Dict{ExprVar,ExprEnv}(), pat_expr.buf)
+        return 1
+    end
+
+    pat_args = ExprEnv[]
+    ee_args!(ExprEnv(UInt8(0), pat_v, UInt32(0), pat_expr), pat_args)
+    sources = pat_args[2:end]   # ExprEnv for each sub-pattern
+
+    # Build factors: one per sub-pattern via asource_new
+    factors = Any[]
+    for ee in sources
+        span = expr_span(ee.base, Int(ee.offset) + 1)
+        sub  = MORK.Expr(Vector{UInt8}(span))
+        src  = asource_new(sub)
+        push!(factors, source_factor(src, btm))
+    end
+
+    # primary = factors[1], secondaries = factors[2:end]
+    primary    = popfirst!(factors)
+    prz        = ProductZipperG(primary, factors)
+    prefix_len = pzg_root_prefix_len(prz)
+
+    candidate        = 0
+    bindings_scratch = Dict{ExprVar, ExprEnv}()
+    pairs_scratch    = Tuple{ExprEnv, ExprEnv}[]
+
+    while pzg_to_next_val!(prz)
+        # Only yield when focus is on the last factor (mirrors query_multi_raw)
+        pzg_focus_factor(prz) != pzg_factor_count(prz) - 1 && continue
+
+        # Build expression from origin_path (includes prefix for CmpSource)
+        combined = collect(pzg_origin_path(prz))
+
+        # factor_paths are into path(); offset by prefix_len for origin_path
+        fps        = pzg_factor_paths(prz)
+        boundaries = vcat(0, [fp + prefix_len for fp in fps], length(combined))
+
+        empty!(pairs_scratch)
+        all_sliced = true
+        for (k, src) in enumerate(sources)
+            lo = boundaries[k] + 1
+            hi = boundaries[k + 1]
+            if lo > hi || lo > length(combined)
+                all_sliced = false; break
+            end
+            expr = MORK.Expr(combined[lo:hi])
+            push!(pairs_scratch, (src, ExprEnv(UInt8(k), UInt8(0), UInt32(0), expr)))
+        end
+        all_sliced || continue
+        length(pairs_scratch) < length(sources) && continue
+
+        # Guard: skip incomplete-secondary yields (DependentZipper primary at leaf
+        # before secondary fully traversed). Mirrors upstream which reads past end
+        # of incomplete paths — we need explicit bounds safety in Julia.
+        pzg_child_count(prz) != 0 && (empty!(bindings_scratch); continue)
+
+        result = try
+            _expr_unify_inplace!(pairs_scratch, bindings_scratch)
+        catch
+            nothing  # malformed/incomplete expression bytes — skip
+        end
+        if result === true
+            candidate += 1
+            bindings_out = copy(bindings_scratch)
+            empty!(bindings_scratch)
+            if !effect(bindings_out, combined)
+                break
+            end
+        else
+            empty!(bindings_scratch)
+        end
+    end
+
+    candidate
+end
+
+space_query_multi_i(btm::PathMap{UnitVal}, pat_expr::MORK.Expr, effect::Function) =
+    space_query_multi_i(btm, pat_expr, UInt8(0), effect)
+
 # Internal hot path — takes pre-allocated scratch buffers so the
 # per-unify-attempt Dict allocation is eliminated.
 function _space_query_multi_inner!(btm::PathMap{UnitVal},
@@ -428,8 +529,9 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
     ee_args!(ee_tpl, tpl_args)
     template_ees = tpl_args[2:end]
 
-    any_new = Ref(false)
-    touched = space_query_multi(s.btm, pat_expr, pat_v, (bindings, loc_expr) -> begin
+    any_new  = Ref(false)
+    query_fn = no_source ? space_query_multi : space_query_multi_i
+    touched  = query_fn(s.btm, pat_expr, pat_v, (bindings, loc_expr) -> begin
         if no_sink
             # `,` template functor — apply each template and insert result directly
             for ee in template_ees
@@ -806,7 +908,7 @@ export space_backup_tree, space_restore_tree!
 export space_backup_paths, space_restore_paths!
 export space_backup_symbols, space_restore_symbols!
 export space_prefix_subsumption, space_token_bfs, space_load_csv!
-export BreakQuery, space_query_multi, _space_query_multi_inner!
+export BreakQuery, space_query_multi, space_query_multi_i, _space_query_multi_inner!
 export space_transform_multi_multi!
 export space_interpret!, space_metta_calculus!
 
