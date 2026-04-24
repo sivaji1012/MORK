@@ -26,6 +26,7 @@ include("expr/ExprAlg.jl")
 include("interning/Interning.jl")
 
 # Frontend parsers: MeTTa sexpr + JSON. Ports mork/frontend/src/.
+include("frontend/ImmutableString.jl")
 include("frontend/Frontend.jl")
 include("frontend/HEParser.jl")
 include("frontend/RosettaParser.jl")
@@ -52,6 +53,7 @@ include("kernel/Main.jl")
 
 # ServerSpace + StatusMap — path-level permission tracking.
 # Ports mork/server/src/server_space.rs + status_map.rs.
+include("server/ResourceStore.jl")
 include("server/ServerSpace.jl")
 
 # Command handlers (count, explore, import, export, transform, upload, ...).
