@@ -321,9 +321,12 @@ function _space_query_multi_inner!(btm::PathMap{UnitVal},
                                     effect::Function,
                                     bindings_scratch::Dict{ExprVar, ExprEnv},
                                     pairs_scratch::Vector{Tuple{ExprEnv, ExprEnv}}) :: Int
+    # Rule of 64: warn if pattern exceeds practical source limit.
+    # ProductZipper with N>2 factors iterates N^M paths (M=trie depth) and
+    # becomes intractable beyond 2 secondary factors in practice.
+    n_factors > 4 && @warn "query_multi: $(n_factors) sources (>4) may be slow — Rule of 64 boundary"
+
     pat_args = ExprEnv[]
-    # Use pat_v as starting variable count so VarRef indices in pattern
-    # match the binding keys expected by the template's expr_apply call.
     ee0 = ExprEnv(UInt8(0), pat_v, UInt32(0), pat_expr)
     ee_args!(ee0, pat_args)
     sources = pat_args[2:end]

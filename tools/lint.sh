@@ -59,6 +59,17 @@ else
     ERRORS=$((ERRORS + 1))
 fi
 
+# ── Check 5: no step cap > 100k in integration tests ────────────────────────
+BIG_CAPS=$(grep -rn "metta_calculus.*[0-9_]\{8,\}" test/integration/*.jl 2>/dev/null | grep -v "#")
+if [ -n "$BIG_CAPS" ]; then
+    echo ""
+    echo "FAIL: integration tests with step cap > 100k (will hang):"
+    echo "$BIG_CAPS"
+    ERRORS=$((ERRORS + 1))
+else
+    echo "PASS: all integration test step caps safe (<=100k)"
+fi
+
 # ── Summary ─────────────────────────────────────────────────────────────────
 echo ""
 if [ $ERRORS -eq 0 ]; then

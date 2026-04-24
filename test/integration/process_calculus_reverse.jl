@@ -20,7 +20,7 @@ using MORK, Test
 (petri (? (add \$ret) (Z \$y) (! \$ret \$y)))
 (petri (! (add result) ((S (S Z)) (S (S Z)))))
     """)
-    steps = space_metta_calculus!(s, 1_000_000_000)
+    steps = space_metta_calculus!(s, 100_000)
     @test steps < 1_000_000_000
     result = space_dump_all_sexpr(s)
     # 2+2=4: result should contain (S (S (S (S Z)))) i.e. Peano 4

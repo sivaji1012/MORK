@@ -32,7 +32,7 @@ using MORK, Test
         isempty(strip(line)) && continue
         space_add_all_sexpr!(s, "(axiom $line)\n")
     end
-    steps = space_metta_calculus!(s, 1_000_000)
-    @test steps < 1_000_000
+    steps = space_metta_calculus!(s, 100_000)
+    @test steps < 100_000
     @test space_val_count(s) == 79
 end

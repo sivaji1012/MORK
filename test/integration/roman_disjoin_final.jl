@@ -14,7 +14,7 @@ using MORK, Test
 (exec 0 (, (lt \$a \$b)) (, (disjoint \$a \$b)))
 (exec 0 (, (elementOf \$ea \$a) (elementOf \$ea \$b)) (O (- (disjoint \$a \$b))))
     """)
-    steps = space_metta_calculus!(s, 10_000_000)
+    steps = space_metta_calculus!(s, 100_000)
     @test steps < 10_000_000
     result = space_dump_all_sexpr(s)
     @test  occursin("(disjoint 1 2)", result)

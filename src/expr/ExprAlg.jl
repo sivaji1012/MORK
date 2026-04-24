@@ -305,7 +305,14 @@ end
 # expr_apply — substitution (ports apply in mork_expr)
 # =====================================================================
 
-const APPLY_DEPTH = 64
+# MORK "Rule of 64" design boundaries (from upstream expr/src/lib.rs)
+# These are not arbitrary — they fall directly from the 6-bit fields in the
+# byte tag encoding (Arity/VarRef/SymbolSize all capped at 63).
+const MAX_EXPR_ARITY   = 63   # max children per expression node
+const MAX_SYMBOL_SIZE  = 63   # max bytes in a symbol name
+const MAX_VAR_REFS     = 63   # max variable back-references per expression
+const MAX_SOURCES      = 63   # max sources in a multi-source pattern
+const APPLY_DEPTH      = 64   # max recursion depth in expr_apply
 
 """
     expr_apply(n, original_intros, new_intros, ez, bindings, oz, cycled, stack, assignments)
