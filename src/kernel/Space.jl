@@ -578,6 +578,114 @@ function space_metta_calculus!(s::Space, steps::Int=typemax(Int)) :: Int
 end
 
 # =====================================================================
+# space_add_sexpr! / space_remove_sexpr! — pattern+template variants
+# Mirrors Space::add_sexpr / remove_sexpr / load_sexpr_impl in space.rs
+# =====================================================================
+
+function space_add_sexpr!(s::Space, src, pattern::MORK.Expr, template::MORK.Expr) :: Int
+    _space_load_sexpr_impl!(s, src, pattern, template, true)
+end
+
+function space_remove_sexpr!(s::Space, src, pattern::MORK.Expr, template::MORK.Expr) :: Int
+    _space_load_sexpr_impl!(s, src, pattern, template, false)
+end
+
+function _space_load_sexpr_impl!(s::Space, src, pattern::MORK.Expr, template::MORK.Expr, add::Bool) :: Int
+    bytes  = src isa Vector{UInt8} ? src : Vector{UInt8}(src)
+    ctx    = SexprContext(bytes)
+    parser = SpaceParser()
+    count  = 0
+    while true
+        buf = Vector{UInt8}(undef, max(length(bytes) * 2, 64))
+        z   = ExprZipper(MORK.Expr(buf), 1)
+        try
+            sexpr_parse!(parser, ctx, z)
+        catch e
+            e isa SexprException && e.err == SERR_INPUT_FINISHED && break
+            rethrow()
+        end
+        data_expr = MORK.Expr(z.root.buf[1:z.loc-1])
+        empty!(ctx.variables)
+
+        # Unify data_expr with pattern, apply template
+        bindings = Dict{ExprVar,ExprEnv}()
+        pairs    = Tuple{ExprEnv,ExprEnv}[
+            (ExprEnv(UInt8(0), UInt8(0), UInt32(0), pattern),
+             ExprEnv(UInt8(1), UInt8(0), UInt32(0), data_expr))
+        ]
+        _expr_unify_inplace!(pairs, bindings) === true || continue
+
+        out_buf = Vector{UInt8}(undef, max(length(template.buf) * 4, 256))
+        ez_tpl  = ExprZipper(template, 1)
+        oz      = ExprZipper(MORK.Expr(out_buf), 1)
+        expr_apply(UInt8(0), UInt8(0), UInt8(0), ez_tpl, bindings, oz,
+                   Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
+        result_bytes = oz.root.buf[1:oz.loc-1]
+        if add; set_val_at!(s.btm, result_bytes, UNIT_VAL)
+        else;    remove_val_at!(s.btm, result_bytes); end
+        count += 1
+    end
+    count
+end
+
+# =====================================================================
+# space_dump_sexpr — dump matching expressions via pattern/template
+# Mirrors Space::dump_sexpr in space.rs
+# =====================================================================
+
+function space_dump_sexpr(s::Space, pattern::MORK.Expr, template::MORK.Expr, io::IO) :: Int
+    # Wrap pattern in comma functor: (, pattern) so query_multi can process it
+    pat_wrap_buf = vcat(
+        item_byte(ExprArity(UInt8(2))),
+        item_byte(ExprSymbol(UInt8(1))), UInt8(','),
+        pattern.buf
+    )
+    pat_wrapped = MORK.Expr(pat_wrap_buf)
+
+    count = Ref(0)
+    space_query_multi(s.btm, pat_wrapped, UInt8(0), (bindings, _loc_buf) -> begin
+        out_buf = Vector{UInt8}(undef, max(length(template.buf) * 4, 256))
+        ez_tpl  = ExprZipper(template, 1)
+        oz      = ExprZipper(MORK.Expr(out_buf), 1)
+        expr_apply(UInt8(0), UInt8(0), UInt8(0), ez_tpl, bindings, oz,
+                   Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
+        result_bytes = oz.root.buf[1:oz.loc-1]
+        println(io, expr_serialize(result_bytes))
+        count[] += 1
+        true
+    end)
+    count[]
+end
+
+space_dump_sexpr(s::Space, pattern::MORK.Expr, template::MORK.Expr) =
+    space_dump_sexpr(s, pattern, template, stdout)
+
+# =====================================================================
+# Persistence — backup/restore tree and paths
+# Mirrors Space::backup_tree/restore_tree/backup_paths/restore_paths
+# backup_symbols/restore_symbols are no-ops (no interning in this port)
+# =====================================================================
+
+function space_backup_tree(s::Space, path::AbstractString)
+    open(path, "w") do io; serialize_paths(s.btm, io); end
+end
+
+function space_restore_tree!(s::Space, path::AbstractString)
+    open(path, "r") do io; deserialize_paths(s.btm, io, UNIT_VAL); end
+end
+
+function space_backup_paths(s::Space, path::AbstractString)
+    open(path, "w") do io; serialize_paths(s.btm, io); end
+end
+
+function space_restore_paths!(s::Space, path::AbstractString)
+    open(path, "r") do io; deserialize_paths(s.btm, io, UNIT_VAL); end
+end
+
+space_backup_symbols(::Space, ::AbstractString)  = nothing  # no interning in this port
+space_restore_symbols!(::Space, ::AbstractString) = nothing
+
+# =====================================================================
 # Exports
 # =====================================================================
 
@@ -585,7 +693,11 @@ export SPACE_SIZES, SPACE_ARITIES, SPACE_VARS
 export SpaceParser
 export Space, new_space, space_val_count, space_statistics
 export space_add_all_sexpr!, space_remove_all_sexpr!
-export space_dump_all_sexpr, space_load_json!
+export space_add_sexpr!, space_remove_sexpr!
+export space_dump_all_sexpr, space_dump_sexpr, space_load_json!
+export space_backup_tree, space_restore_tree!
+export space_backup_paths, space_restore_paths!
+export space_backup_symbols, space_restore_symbols!
 export BreakQuery, space_query_multi, _space_query_multi_inner!
 export space_transform_multi_multi!
 export space_interpret!, space_metta_calculus!
