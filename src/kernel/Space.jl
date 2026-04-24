@@ -906,11 +906,117 @@ export space_add_sexpr!, space_remove_sexpr!
 export space_dump_all_sexpr, space_dump_sexpr, space_load_json!
 export space_backup_tree, space_restore_tree!
 export space_backup_paths, space_restore_paths!
+# =====================================================================
+# space_sexpr_to_expr — server-branch addition
+# Mirrors sexpr_to_path / Space::sexpr_to_expr in space_temporary.rs
+# =====================================================================
+
+function space_sexpr_to_expr(s::Space, sexpr::AbstractString) :: MORK.Expr
+    sexpr_to_expr(sexpr)
+end
+
+# =====================================================================
+# space_metta_calculus_at! — server-branch addition
+# Mirrors Space::metta_calculus(thread_id_sexpr_str, ...) in space_temporary.rs
+# Runs metta_calculus consuming only (exec (<location> $priority) ...) atoms.
+# =====================================================================
+
+function space_metta_calculus_at!(s::Space, location_sexpr::AbstractString,
+                                   max_steps::Int=typemax(Int)) :: Int
+    # Build the exec prefix for this location: (exec (<location> $) $ $)
+    # Mirrors metta_calculus_impl: prefix_e = format!("(exec ({} $) $ $)", thread_id)
+    prefix_str = "(exec ($location_sexpr \$) \$ \$)"
+    try
+        prefix_expr = sexpr_to_expr(prefix_str)
+        prefix_bytes = prefix_expr.buf
+
+        done = 0
+        while done < max_steps
+            rz    = read_zipper_at_path(s.btm, prefix_bytes)
+            found = zipper_to_next_val!(rz)
+            !found && break
+
+            rel_path  = collect(zipper_path(rz))
+            full_path = vcat(prefix_bytes, rel_path)
+            remove_val_at!(s.btm, full_path)
+            rt = MORK.Expr(full_path)
+            space_interpret!(s, rt)
+            done += 1
+        end
+        done
+    catch e
+        @warn "space_metta_calculus_at!: $e"
+        0
+    end
+end
+
+# =====================================================================
+# space_acquire_transform_permissions — server-branch addition
+# Mirrors Space::acquire_transform_permissions in space_temporary.rs.
+# Returns (read_map, template_prefixes, writer_paths) where:
+#   read_map          = PathMap copy of all pattern subtries
+#   template_prefixes = Vector{Tuple{Int,Int}} (incremental_start, writer_idx)
+#   writer_paths      = Vector{Vector{UInt8}} (one path per unique writer slot)
+# =====================================================================
+
+function space_acquire_transform_permissions(s::Space,
+                                              patterns::Vector{MORK.Expr},
+                                              templates::Vector{MORK.Expr})
+    # Compute constant prefix for each expression (longest ground prefix)
+    # Simplified: use empty prefix (matches all) — mirrors till_constant_to_full fallback
+    _prefix(e::MORK.Expr) = UInt8[]
+
+    # Build template prefix table, sorted shortest-first (mirrors sort_by len)
+    tpl_paths = [_prefix(t) for t in templates]
+    sorted_idx = sortperm(tpl_paths; by=length)
+
+    # Find unique writer slots via prefix subsumption
+    writer_slots = Vector{UInt8}[]
+    writer_slot_idx = zeros(Int, length(templates))
+    for i in sorted_idx
+        path = tpl_paths[i]
+        subsumed = false
+        for (slot_idx, slot_path) in enumerate(writer_slots)
+            overlap = 0
+            for j in 1:min(length(path), length(slot_path))
+                path[j] == slot_path[j] ? (overlap = j) : break
+            end
+            if overlap == length(slot_path)
+                writer_slot_idx[i] = slot_idx
+                subsumed = true
+                break
+            end
+        end
+        if !subsumed
+            push!(writer_slots, path)
+            writer_slot_idx[i] = length(writer_slots)
+        end
+    end
+
+    # Build template_prefixes: (incremental_path_start, writer_slot_idx)
+    template_prefixes = [(length(writer_slots[writer_slot_idx[i]]), writer_slot_idx[i])
+                         for i in 1:length(templates)]
+
+    # Build read_map: copy each pattern subtrie
+    read_map = PathMap{UnitVal}()
+    for pat in patterns
+        prefix = _prefix(pat)
+        rz = read_zipper_at_path(s.btm, prefix)
+        wz = write_zipper_at_path(read_map, prefix)
+        while zipper_to_next_val!(rz)
+            set_val_at!(read_map, collect(zipper_path(rz)), UNIT_VAL)
+        end
+    end
+
+    (read_map, template_prefixes, writer_slots)
+end
+
 export space_backup_symbols, space_restore_symbols!
 export space_prefix_subsumption, space_token_bfs, space_load_csv!
 export BreakQuery, space_query_multi, space_query_multi_i, _space_query_multi_inner!
 export space_transform_multi_multi!
 export space_interpret!, space_metta_calculus!
+export space_sexpr_to_expr, space_metta_calculus_at!, space_acquire_transform_permissions
 
 # Precompile hot-path method specializations so JIT fires at package load,
 # not on first user call. Mirrors upstream's statically-compiled hot paths.

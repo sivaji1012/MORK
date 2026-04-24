@@ -35,6 +35,7 @@ include("frontend/CZ3Parser.jl")
 
 # Kernel: query source abstraction (BTM/ACT/Z3/CmpSource).
 # Ports mork/kernel/src/sources.rs.
+include("kernel/Prefix.jl")
 include("kernel/Sources.jl")
 
 # Kernel: pure numeric primitives. Ports mork/kernel/src/pure.rs.
