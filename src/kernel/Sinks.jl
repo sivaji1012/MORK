@@ -138,16 +138,10 @@ end
 function sink_finalize!(s::RemoveSink, btm::PathMap{UnitVal}) :: Bool
     changed = false
     for p in s.to_remove
-        old = get_val_at(btm, p)
-        if old !== nothing || begin
-            # check if path exists as a key (for PathMap{UnitVal}, old===nothing always)
-            wz = write_zipper(btm)
-            wz_descend_to!(wz, p)
-            v = wz_remove_val!(wz, true)
-            v !== nothing
-        end
-            changed = true
-        end
+        wz = write_zipper(btm)
+        wz_descend_to!(wz, p)
+        v = wz_remove_val!(wz, true)
+        v !== nothing && (changed = true)
     end
     changed
 end

@@ -405,29 +405,51 @@ indicates whether at least one new expression was added.
 function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt8,
                                        tpl_expr::MORK.Expr, tpl_v::UInt8,
                                        add_expr::MORK.Expr) :: Tuple{Int, Bool}
-    # Decompose tpl_expr into its template children, preserving per-item v offsets
     tpl_args = ExprEnv[]
     ee_tpl = ExprEnv(UInt8(0), tpl_v, UInt32(0), tpl_expr)
     ee_args!(ee_tpl, tpl_args)
-    # Each tpl_args[i] carries the correct v (cumulative variable count up to that item)
     template_ees = tpl_args[2:end]
 
-    any_new  = Ref(false)
-    # Pass pat_v so query uses correct variable start index for the pattern
-    touched  = space_query_multi(s.btm, pat_expr, pat_v, (bindings, loc_expr) -> begin
-        for ee in template_ees
-            tpl_bytes = ee.base.buf[Int(ee.offset)+1 : end]
-            tpl_e = MORK.Expr(Vector{UInt8}(tpl_bytes))
-            out_buf = Vector{UInt8}(undef, max(length(tpl_bytes) * 4, 64))
-            ez  = ExprZipper(tpl_e, 1)
-            oz  = ExprZipper(MORK.Expr(out_buf), 1)
-            # Use ee.v as original_intros so VarRef indices match binding keys
-            expr_apply(UInt8(0), ee.v, UInt8(0), ez, bindings, oz,
-                       Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
-            result_bytes = oz.root.buf[1:oz.loc-1]
-            old = get_val_at(s.btm, result_bytes)
-            set_val_at!(s.btm, result_bytes, UNIT_VAL)
-            old === nothing && (any_new[] = true)
+    # Detect O functor: (O sink1 sink2 ...) → use sink machinery instead of set_val_at!
+    use_sinks = length(tpl_expr.buf) >= 2 &&
+                byte_item(tpl_expr.buf[1]) isa ExprArity &&
+                byte_item(tpl_expr.buf[2]) isa ExprSymbol &&
+                (byte_item(tpl_expr.buf[2])::ExprSymbol).size == 1 &&
+                length(tpl_expr.buf) >= 3 && tpl_expr.buf[3] == UInt8('O')
+
+    any_new = Ref(false)
+    touched = space_query_multi(s.btm, pat_expr, pat_v, (bindings, loc_expr) -> begin
+        if use_sinks
+            # O functor: each template item is a sink descriptor
+            for ee in template_ees
+                tpl_bytes = ee.base.buf[Int(ee.offset)+1 : end]
+                tpl_e = MORK.Expr(Vector{UInt8}(tpl_bytes))
+                out_buf = Vector{UInt8}(undef, max(length(tpl_bytes) * 4, 64))
+                ez = ExprZipper(tpl_e, 1)
+                oz = ExprZipper(MORK.Expr(out_buf), 1)
+                expr_apply(UInt8(0), ee.v, UInt8(0), ez, bindings, oz,
+                           Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
+                result_expr = MORK.Expr(oz.root.buf[1:oz.loc-1])
+                sink = asink_new(result_expr)
+                sink_apply!(sink, bindings, result_expr.buf, s.btm)
+                changed = sink_finalize!(sink, s.btm)
+                changed && (any_new[] = true)
+            end
+        else
+            # , functor: each template item is a value to add
+            for ee in template_ees
+                tpl_bytes = ee.base.buf[Int(ee.offset)+1 : end]
+                tpl_e = MORK.Expr(Vector{UInt8}(tpl_bytes))
+                out_buf = Vector{UInt8}(undef, max(length(tpl_bytes) * 4, 64))
+                ez = ExprZipper(tpl_e, 1)
+                oz = ExprZipper(MORK.Expr(out_buf), 1)
+                expr_apply(UInt8(0), ee.v, UInt8(0), ez, bindings, oz,
+                           Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
+                result_bytes = oz.root.buf[1:oz.loc-1]
+                old = get_val_at(s.btm, result_bytes)
+                set_val_at!(s.btm, result_bytes, UNIT_VAL)
+                old === nothing && (any_new[] = true)
+            end
         end
         true
     end)
