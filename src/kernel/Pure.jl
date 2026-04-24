@@ -408,6 +408,14 @@ const PURE_OPS = Dict{String, Function}(
     "i128_one"     => (_) -> Int64(1),
     "i128_from_string" => (a) -> parse(Int64, String(a[1])),
     "i128_to_string"   => (a) -> Vector{UInt8}(string(_read_i64(a[1]))),
+    "sub_i128"         => (a) -> _read_i64(a[1]) - _read_i64(a[2]),
+    "div_i128"         => (a) -> div(_read_i64(a[1]), _read_i64(a[2])),
+    "i128_as_i8"       => (a) -> Int8(_read_i64(a[1])),
+    "i128_as_i16"      => (a) -> Int16(_read_i64(a[1])),
+    "i128_as_i32"      => (a) -> Int32(_read_i64(a[1])),
+    "i128_as_i64"      => (a) -> Int64(_read_i64(a[1])),
+    "i128_as_f32"      => (a) -> Float32(_read_i64(a[1])),
+    "i128_as_f64"      => (a) -> Float64(_read_i64(a[1])),
 
     # ── type conversions ─────────────────────────────────────────────
     "i8_as_i16"   => (a) -> Int16(_read_i8(a[1])),
@@ -488,6 +496,8 @@ const PURE_OPS = Dict{String, Function}(
     "powi_f64"    => (a) -> _read_f64(a[1]) ^ Int32(_read_i32(a[2])),
     "hypot_f32"   => (a) -> hypot(_read_f32(a[1]), _read_f32(a[2])),
     "hypot_f64"   => (a) -> hypot(_read_f64(a[1]), _read_f64(a[2])),
+    "sqrt_f32"    => (a) -> sqrt(_read_f32(a[1])),
+    "sqrt_f64"    => (a) -> sqrt(_read_f64(a[1])),
     "cbrt_f32"    => (a) -> cbrt(_read_f32(a[1])),
     "cbrt_f64"    => (a) -> cbrt(_read_f64(a[1])),
     "exp_f32"     => (a) -> exp(_read_f32(a[1])),
