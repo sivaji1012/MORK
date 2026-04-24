@@ -16,27 +16,30 @@ two_positive_equal, two_positive_equal_crossed).
 
 ## Development Workflow
 
-**Always use the warm REPL for iteration.** Starting a new Julia process
-per test pays an ~80s precompile tax. Starting the REPL once and using
-`include()` reduces per-run cost to seconds.
+**Start once, stay warm forever.** Revise auto-reloads `src/` on every save.
 
 ```bash
-# Start warm REPL — full Julia REPL with tab-complete + history (precompile once, ~80s)
+# Start once per session (~15s load, then instant forever)
+cd /tmp/mork-repo
 julia --project=. -i tools/mork_repl.jl
-
-# Inside the REPL — run tests, experiment, iterate cheaply:
-t()                               # run full test suite
-t("test/my_test.jl")              # run specific file
-include("/tmp/scratch.jl")        # ad-hoc test file
-mc("(exec 0 (, foo) (, bar))\nfoo\n")   # eval s-expr interactively
 ```
 
-**Before every commit: cold-start verification.** Revise won't catch struct
-redefinitions or type parameter changes. Always confirm on a fresh Julia:
+Inside the REPL:
+```julia
+t()                    # run full test suite (1555 tests, ~50s first run, instant after)
+t("test/my_test.jl")   # run specific test file
+mc("(exec 0 (, foo) (, bar))\nfoo\n")  # eval s-expr interactively
+```
+
+Edit any file in `src/` → Revise reloads it automatically. No restart needed.
+
+**Note:** Revise cannot reload struct redefinitions (type changes).
+For those, restart the REPL once. All function-body changes reload instantly.
+
+**Before every commit: cold-start verification.**
 
 ```bash
-touch src/MORK.jl                 # invalidate precompile cache
-julia --project=. -e 'using MORK; include("test/runtests.jl")'
+echo 't()' | julia --project=. tools/mork_repl.jl
 ```
 
 **Use `include()` from the REPL, not piped stdin.** Piping multiline
