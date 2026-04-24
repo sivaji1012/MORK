@@ -210,7 +210,7 @@ function _expr_unify_core!(stack::Vector{Tuple{ExprEnv, ExprEnv}},
     iters    = 0
 
     # deref: follow chain of bindings
-    function _deref(t::ExprEnv)
+    function _deref(t::ExprEnv) :: ExprEnv
         while true
             vo = ee_var_opt(t)
             vo === nothing && return t
@@ -325,6 +325,8 @@ function expr_apply(n::UInt8, original_intros::UInt8, new_intros::UInt8,
     length(stack) > APPLY_DEPTH && error("expr_apply depth > $APPLY_DEPTH: n=$n")
 
     while true
+        ez.loc > length(ez.root) && return (original_intros, new_intros)
+        _loc_before = ez.loc          # invariant: must advance each iteration
         b = ez.root.buf[ez.loc]
         tag = byte_item(b)
 
@@ -409,6 +411,7 @@ function expr_apply(n::UInt8, original_intros::UInt8, new_intros::UInt8,
         if !(tag isa ExprSymbol)
             ez.loc <= length(ez.root) || return (original_intros, new_intros)
         end
+        @assert ez.loc > _loc_before "expr_apply: ez.loc did not advance for tag $(typeof(tag)) at byte 0x$(string(b, base=16))"
     end
 end
 

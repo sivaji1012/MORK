@@ -73,7 +73,7 @@ end
 pz_factor_count(pz::ProductZipper) = 1 + length(pz.secondaries)
 
 """Index (0-based) of the factor that currently contains the cursor."""
-function pz_focus_factor(pz::ProductZipper)
+function pz_focus_factor(pz::ProductZipper) :: Int
     path_len = length(zipper_path(pz.z))
     for (i, fp) in enumerate(pz.factor_paths)
         path_len < fp && return i - 1
@@ -129,9 +129,9 @@ end
 # Zipper interface
 # =====================================================================
 
-pz_at_root(pz::ProductZipper) = isempty(zipper_path(pz.z))
-pz_path(pz::ProductZipper)    = zipper_path(pz.z)
-pz_is_val(pz::ProductZipper)  = zipper_is_val(pz.z)
+pz_at_root(pz::ProductZipper) :: Bool = isempty(zipper_path(pz.z))
+pz_path(pz::ProductZipper)           = zipper_path(pz.z)
+pz_is_val(pz::ProductZipper)  :: Bool = zipper_is_val(pz.z)
 pz_val(pz::ProductZipper{V})  where V = zipper_val(pz.z)
 pz_path_exists(pz::ProductZipper) = zipper_path_exists(pz.z)
 pz_child_mask(pz::ProductZipper) = zipper_child_mask(pz.z)
