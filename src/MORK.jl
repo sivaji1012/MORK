@@ -6,6 +6,8 @@
 module MORK
 
 using Base64
+using HTTP: HTTP
+using JSON3
 using PathMap
 
 # ── Phase 2: Expression layer (mork/expr/) ────────────────────────────────────
@@ -42,11 +44,26 @@ include("kernel/Space.jl")
 # Kernel: top-level entry points. Ports mork/kernel/src/main.rs.
 include("kernel/Main.jl")
 
+# ── Server layer (mork/server/) ────────────────────────────────────────────────
+
+# ServerSpace + StatusMap — path-level permission tracking.
+# Ports mork/server/src/server_space.rs + status_map.rs.
+include("server/ServerSpace.jl")
+
+# Command handlers (count, explore, import, export, transform, upload, ...).
+# Ports mork/server/src/commands.rs.
+include("server/Commands.jl")
+
+# HTTP server entry point.
+# Ports mork/server/src/main.rs.
+include("server/Server.jl")
+
 """
     version() -> VersionNumber
 """
 version() = v"0.1.0"
 
 export version
+export HTTP
 
 end # module MORK
