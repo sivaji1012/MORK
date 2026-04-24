@@ -422,9 +422,10 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
         if use_sinks
             # O functor: each template item is a sink descriptor
             for ee in template_ees
-                tpl_bytes = ee.base.buf[Int(ee.offset)+1 : end]
-                tpl_e = MORK.Expr(Vector{UInt8}(tpl_bytes))
-                out_buf = Vector{UInt8}(undef, max(length(tpl_bytes) * 4, 64))
+                # Use expr_span to truncate to just this sub-expression (not siblings)
+                tpl_span = expr_span(ee.base, Int(ee.offset) + 1)
+                tpl_e = MORK.Expr(Vector{UInt8}(tpl_span))
+                out_buf = Vector{UInt8}(undef, max(length(tpl_span) * 4, 64))
                 ez = ExprZipper(tpl_e, 1)
                 oz = ExprZipper(MORK.Expr(out_buf), 1)
                 expr_apply(UInt8(0), ee.v, UInt8(0), ez, bindings, oz,
@@ -438,9 +439,9 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
         else
             # , functor: each template item is a value to add
             for ee in template_ees
-                tpl_bytes = ee.base.buf[Int(ee.offset)+1 : end]
-                tpl_e = MORK.Expr(Vector{UInt8}(tpl_bytes))
-                out_buf = Vector{UInt8}(undef, max(length(tpl_bytes) * 4, 64))
+                tpl_span = expr_span(ee.base, Int(ee.offset) + 1)
+                tpl_e = MORK.Expr(Vector{UInt8}(tpl_span))
+                out_buf = Vector{UInt8}(undef, max(length(tpl_span) * 4, 64))
                 ez = ExprZipper(tpl_e, 1)
                 oz = ExprZipper(MORK.Expr(out_buf), 1)
                 expr_apply(UInt8(0), ee.v, UInt8(0), ez, bindings, oz,
