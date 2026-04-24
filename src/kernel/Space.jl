@@ -364,6 +364,12 @@ function _space_query_multi_inner!(btm::PathMap{UnitVal},
                       (src, ExprEnv(UInt8(k), UInt8(0), UInt32(0), expr)))
             end
 
+            # Skip spurious enrollment-only yields (secondary path is empty)
+            if length(pairs_scratch) < length(sources)
+                empty!(bindings_scratch)
+                continue
+            end
+
             # Unify into scratch Dict (zero alloc on failure)
             result = _expr_unify_inplace!(pairs_scratch, bindings_scratch)
             if result === true
