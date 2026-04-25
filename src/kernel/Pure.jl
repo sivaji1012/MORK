@@ -601,8 +601,42 @@ const PURE_OPS = Dict{String, Function}(
 
     # ── symbol ops ───────────────────────────────────────────────────
     "reverse_symbol"  => (a) -> reverse(a[1]),
-    "collapse_symbol" => (a) -> reduce(vcat, a; init=UInt8[]),
-    "explode_symbol"  => (a) -> a[1],   # returns bytes as-is; caller iterates
+    # collapse_symbol: takes ONE argument.
+    # If arg is a MORK arity expression (e.g., from quote '(...)), parse and concat symbol payloads.
+    # Otherwise, concatenate all arg byte arrays (legacy explode_symbol usage).
+    # Mirrors collapse_symbol in pure.rs: reads arity-N expression, extracts symbol payloads.
+    "collapse_symbol" => function(a)
+        buf = a[1]
+        isempty(buf) && return UInt8[]
+        tag = try byte_item(buf[1]) catch; nothing end
+        if tag isa ExprArity
+            result = UInt8[]
+            off = 2
+            for _ in 1:Int(tag.arity)
+                off > length(buf) && break
+                st = try byte_item(buf[off]) catch; break end
+                st isa ExprSymbol || break
+                n = Int(st.size)
+                append!(result, buf[off+1 : min(off+n, length(buf))])
+                off += 1 + n
+            end
+            return result
+        end
+        reduce(vcat, a; init=UInt8[])
+    end,
+    # explode_symbol: takes ONE symbol, returns arity-N MORK expression (one 1-byte symbol per byte).
+    # Mirrors explode_symbol in pure.rs.
+    "explode_symbol"  => function(a)
+        payload = a[1]
+        n = length(payload)
+        n == 0 && return UInt8[item_byte(ExprArity(UInt8(0)))]
+        result = UInt8[item_byte(ExprArity(UInt8(n)))]
+        for b in payload
+            push!(result, item_byte(ExprSymbol(UInt8(1))))
+            push!(result, b)
+        end
+        result
+    end,
 
     # ── hash / encode / decode ────────────────────────────────────────
     "hash_expr"        => (a) -> _be_bytes(UInt64(hash(a[1]))),
