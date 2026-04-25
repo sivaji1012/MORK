@@ -68,8 +68,31 @@ end
 # Derive a path prefix from an expression (stub — upstream uses
 # derive_prefix_from_expr_slice which finds the longest ground prefix)
 # For now returns empty prefix (matches all).
+# _derive_prefix: constant prefix of expr up to first NewVar/VarRef.
+# "a" → full; "(isa)" → full; "(isa \$x \$y)" → [Arity3, "isa"]; "\$x" → []
+# Mirrors derive_prefix_from_expr_slice + till_constant_to_till_last_constant.
 function _derive_prefix(expr::MORK.Expr) :: Vector{UInt8}
-    UInt8[]
+    buf = expr.buf
+    n   = length(buf)
+    # BFS walk via an explicit stack of (offset, remaining_children) pairs.
+    # We include bytes only while they are constant (Symbol or Arity header).
+    # As soon as we see a NewVar or VarRef, we stop.
+    i = 1
+    stack = Int[]   # remaining child counts at each depth
+    while i <= n
+        b   = buf[i]
+        tag = byte_item(b)
+        if tag isa ExprNewVar || tag isa ExprVarRef
+            break   # variable encountered — stop here
+        elseif tag isa ExprSymbol
+            i += 1 + Int(tag.size)   # include symbol bytes
+        elseif tag isa ExprArity
+            i += 1   # include the arity header byte, push children
+        else
+            break
+        end
+    end
+    buf[1:i-1]
 end
 
 # Parse transform POST body: "(transform (, pat...) (, tpl...))"
