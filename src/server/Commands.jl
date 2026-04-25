@@ -400,17 +400,26 @@ end
 function cmd_transform(ss::ServerSpace, args::Vector{String}, props::Dict{String,String}, body::Vector{UInt8})
     isempty(body) && return work_error(400, "transform: empty POST body")
     try
-        src = String(body)
-        (patterns, templates) = _parse_transform_body(ss, src)
+        src    = String(body)
+        # Parse (transform <pat_conjunction> <tpl_conjunction>)
+        # Pass the FULL conjunction expressions to space_transform_multi_multi!,
+        # exactly as space_interpret! does — do NOT split the comma list.
+        outer  = sexpr_to_expr(src)
+        eargs  = ExprEnv[]
+        ee_args!(ExprEnv(UInt8(0), UInt8(0), UInt32(0), outer), eargs)
+        length(eargs) >= 3 || return work_error(400, "transform: expected (transform (, pats...) (, tpls...))")
+        pat_expr = MORK.Expr(Vector{UInt8}(expr_span(eargs[2].base, Int(eargs[2].offset)+1)))
+        tpl_expr = MORK.Expr(Vector{UInt8}(expr_span(eargs[3].base, Int(eargs[3].offset)+1)))
 
         writer = ss_new_writer(ss, UInt8[])
         writer === nothing && return work_error(503, "transform: space is locked")
 
         Threads.@spawn begin
             try
-                for (pat, tpl) in zip(patterns, templates)
-                    space_transform_multi_multi!(ss.space, pat, tpl, pat)
-                end
+                space_transform_multi_multi!(ss.space, pat_expr, UInt8(0), tpl_expr, UInt8(0), pat_expr)
+            catch e
+                @error "transform spawn error" exception=(e, catch_backtrace())
+                ss_set_status!(ss, UInt8[], StatusRecord(STATUS_FETCH_ERROR, "transform error: $e"))
             finally
                 ss_release_writer!(ss, writer)
             end
