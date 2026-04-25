@@ -499,6 +499,41 @@ function cmd_metta_thread_suspend(ss::ServerSpace, args::Vector{String}, props::
 end
 
 # =====================================================================
+# status_stream — mirrors StatusStreamCmd in commands.rs
+# GET /status_stream/<expr_sexpr>
+# Returns Server-Sent Events (SSE) stream of status changes for a path.
+# Sends current status immediately, then streams any changes for up to
+# SSE_TIMEOUT_S seconds.  Mirrors StatusStreamCmd::work in commands.rs.
+# =====================================================================
+
+const SSE_TIMEOUT_S = 10.0   # max time to collect stream events
+
+function cmd_status_stream(ss::ServerSpace, args::Vector{String}, props::Dict{String,String}, body::Vector{UInt8})
+    expr_str = isempty(args) ? "" : join(args, "/")
+    prefix   = isempty(expr_str) ? UInt8[] : try
+        _derive_prefix(sexpr_to_expr(expr_str))
+    catch
+        UInt8[]
+    end
+
+    # Create a buffered channel for status events — mirrors mpsc::channel(100)
+    ch = Channel{StatusRecord}(100)
+
+    # Send current status immediately (mirrors tx.send(status).await)
+    current = ss_get_status(ss, prefix)
+    put!(ch, current)
+
+    # Register channel in StatusMap streams so we receive future updates
+    stream_id = UInt64(objectid(ch))
+    sm_add_stream!(ss.status_map, prefix, ch)
+
+    # Return a stream WorkResult — the server will drain the channel
+    # and format each StatusRecord as an SSE "data: ..." event.
+    # Mirrors WorkResult::Streamed in the upstream.
+    work_stream(ch)
+end
+
+# =====================================================================
 # COMMAND_TABLE — maps URL path → (fn, method)
 # Mirrors the dispatch! macro in server/src/main.rs
 # =====================================================================
@@ -512,6 +547,7 @@ const COMMAND_TABLE = Dict{String, Tuple{Symbol, Function}}(
     "export"                => (:GET,  cmd_export),
     "import"                => (:GET,  cmd_import),
     "status"                => (:GET,  cmd_status),
+    "status_stream"         => (:GET,  cmd_status_stream),
     "stop"                  => (:GET,  cmd_stop),
     "metta_thread"          => (:GET,  cmd_metta_thread),
     "metta_thread_suspend"  => (:GET,  cmd_metta_thread_suspend),

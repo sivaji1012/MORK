@@ -110,14 +110,24 @@ function _work_result_to_response(result::WorkResult) :: HTTP.Response
     elseif kind === :error
         HTTP.Response(result[2], result[3])
     elseif kind === :stream
-        # Simplified: drain channel synchronously (true streaming needs HTTP/2 or SSE)
-        ch   = result[2]
-        buf  = IOBuffer()
-        while isopen(ch) || isready(ch)
+        # SSE stream: drain channel and format as Server-Sent Events.
+        # Mirrors WorkResult::Streamed in the upstream — each StatusRecord
+        # is emitted as "data: <json>\n\n" per the SSE spec.
+        ch       = result[2]
+        buf      = IOBuffer()
+        deadline = time() + 10.0   # collect for up to 10 s then flush
+        while time() < deadline && (isopen(ch) || isready(ch))
+            isready(ch) || sleep(0.05)
+            isready(ch) || break
             rec = take!(ch)
-            write(buf, status_to_json(rec), "\n")
+            write(buf, "data: ", status_to_json(rec), "\n\n")
         end
-        HTTP.Response(200, take!(buf))
+        close(ch)
+        HTTP.Response(200,
+            ["Content-Type" => "text/event-stream",
+             "Cache-Control" => "no-cache",
+             "Connection"    => "keep-alive"],
+            take!(buf))
     else
         HTTP.Response(500, "unknown work result kind")
     end
