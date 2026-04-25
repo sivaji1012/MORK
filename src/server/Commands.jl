@@ -514,7 +514,7 @@ function cmd_metta_thread(ss::ServerSpace, args::Vector{String}, props::Dict{Str
 
         Threads.@spawn begin
             try
-                space_metta_calculus!(ss.space, typemax(Int))
+                space_metta_calculus_at!(ss.space, location_str, typemax(Int))
             catch e
                 ss_set_status!(ss, status_loc, StatusRecord(STATUS_EXEC_ERROR, string(e)))
             finally

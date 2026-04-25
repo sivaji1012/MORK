@@ -982,10 +982,13 @@ function space_metta_calculus_at!(s::Space, location_sexpr::AbstractString,
                                    max_steps::Int=typemax(Int)) :: Int
     # Build the exec prefix for this location: (exec (<location> $) $ $)
     # Mirrors metta_calculus_impl: prefix_e = format!("(exec ({} $) $ $)", thread_id)
+    # CRITICAL: use only the CONSTANT prefix (bytes up to first NewVar) so the
+    # read_zipper navigates to the right subtrie. Full buf includes variable bytes
+    # (0xC0 NewVar) which don't exist in the stored paths.
     prefix_str = "(exec ($location_sexpr \$) \$ \$)"
     try
-        prefix_expr = sexpr_to_expr(prefix_str)
-        prefix_bytes = prefix_expr.buf
+        prefix_expr  = sexpr_to_expr(prefix_str)
+        prefix_bytes = _derive_prefix(prefix_expr)   # constant prefix only
 
         done = 0
         while done < max_steps
