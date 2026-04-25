@@ -63,8 +63,10 @@ end
     s = new_space()
     space_add_all_sexpr!(s, exprs_src)
 
-    # `[2] $ $` pattern matches top-level 2-arity terms
-    pat = space_sexpr_to_expr(s, "[2] \$ \$")
+    # Upstream uses expr!(space, "$") — a single variable matching any expression.
+    # [2] $ $ in Rust macro format is NOT the same as MeTTa s-expr "[2] $ $";
+    # in Julia's s-expr parser, [2] is a literal symbol, not ExprArity(2).
+    pat = space_sexpr_to_expr(s, "\$_any")
 
     prime_results = space_token_bfs(s, UInt8[], pat)
     @test length(prime_results) > 0

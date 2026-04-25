@@ -176,4 +176,14 @@ function serve_background!(server::MorkServer) :: Task
     @async serve!(server; verbose=true)
 end
 
+"""
+    serve_background!(ss, port; addr="127.0.0.1") → Task
+
+Convenience: wrap `ss` in a `MorkServer` and start it in a background task.
+"""
+function serve_background!(ss::ServerSpace, port::Int; addr::String="127.0.0.1") :: Task
+    srv = MorkServer(ss, addr, port, Ref(false), Ref(0))
+    serve_background!(srv)
+end
+
 export MorkServer, serve!, serve_background!

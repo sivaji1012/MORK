@@ -776,12 +776,14 @@ function space_token_bfs(s::Space, token::Vector{UInt8}, pattern::MORK.Expr) :: 
     cm  = zipper_child_mask(rz)
     for b in cm
         zipper_descend_to_byte!(rz, b)
-        # Clone zipper, advance to first value to get origin path
+        # Clone zipper, advance to first value to get full expression path.
+        # Mirrors rzc.origin_path() in upstream: full prefix_buf after to_next_val().
+        # NOTE: origin_path_len is the INITIAL anchor length (0 for root zippers) —
+        # do NOT use it to slice; use the full prefix_buf instead.
         rzc = deepcopy(rz)
         zipper_to_next_val!(rzc)
-        # origin_path = prefix_buf[1:origin_path_len]
-        origin = rzc.prefix_buf[1:rzc.origin_path_len]
-        e = MORK.Expr(copy(origin))
+        origin = copy(rzc.prefix_buf)
+        e = MORK.Expr(origin)
         # expr_unifiable: attempt unification, return true if succeeds
         pairs = Tuple{ExprEnv,ExprEnv}[
             (ExprEnv(UInt8(0), UInt8(0), UInt32(0), e),
