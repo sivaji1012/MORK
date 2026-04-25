@@ -189,15 +189,16 @@ function cmd_copy(ss::ServerSpace, args::Vector{String}, props::Dict{String,Stri
             ss_release_reader!(ss, reader); return work_error(503, "copy: dest path is locked")
         end
         try
-            # Mirrors wz.graft(&rz) — copy source trie into dest
+            # Mirrors wz.graft(&rz) — unconditional subtrie copy src→dst.
+            # Collect src values into a temp PathMap (relative to src_prefix),
+            # then graft the whole map into the dst position.
             src_pm = PathMap{UnitVal}()
             rz = read_zipper_at_path(ss.space.btm, src_prefix)
             while zipper_to_next_val!(rz)
                 set_val_at!(src_pm, collect(zipper_path(rz)), UNIT_VAL)
             end
             wz = write_zipper_at_path(ss.space.btm, dst_prefix)
-            rz2 = read_zipper(src_pm)
-            wz_join_into!(wz, rz2.root_node)
+            wz_graft_map!(wz, src_pm)   # mirrors wz.graft(&rz) in upstream
         finally
             ss_release_reader!(ss, reader)
             ss_release_writer!(ss, writer)
@@ -245,7 +246,10 @@ end
 function cmd_explore(ss::ServerSpace, args::Vector{String}, props::Dict{String,String}, body::Vector{UInt8})
     length(args) < 2 && return work_error(400, "explore: expected expr and focus_token")
     expr_str    = args[1]
-    focus_token = Vector{UInt8}(args[2])  # opaque bytes from prior call
+    # focus_token is opaque raw bytes returned by a prior /explore call.
+    # The URL segment is percent-encoded; after unescaping we may have non-UTF-8
+    # bytes. Treat as Latin-1 (each codeunit = one byte) to avoid UTF-8 errors.
+    focus_token = Vector{UInt8}(codeunits(args[2]))
 
     try
         expr   = sexpr_to_expr(expr_str)
