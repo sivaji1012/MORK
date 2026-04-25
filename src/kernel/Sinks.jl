@@ -138,9 +138,18 @@ function sink_apply!(s::RemoveSink, bindings::Dict{ExprVar,ExprEnv},
 end
 
 function sink_finalize!(s::RemoveSink, btm::PathMap{UnitVal}) :: Bool
-    wz = write_zipper(btm)
-    status = wz_subtract_into!(wz, s.remove.root)
-    status != ALG_STATUS_IDENTITY
+    # Subtract collected paths from btm using per-path removal.
+    changed = false
+    rz = read_zipper(s.remove)
+    while zipper_to_next_val!(rz)
+        path = collect(zipper_path(rz))
+        old = get_val_at(btm, path)
+        if old !== nothing
+            remove_val_at!(btm, path)
+            changed = true
+        end
+    end
+    changed
 end
 
 # =====================================================================
@@ -384,8 +393,14 @@ PureSink(e::MORK.Expr) = PureSink(e, false)
     _pure_eval_formula(buf, off) → Union{Vector{UInt8}, Nothing}
 
 Recursively evaluate a pure-ops formula rooted at byte offset `off` (1-based).
-Returns the result bytes, or `nothing` if evaluation should be skipped
-(e.g. `ifnz` with a zero condition and no else branch).
+
+INVARIANT: returns a COMPLETE MORK sub-expression (header byte included):
+  - Scalar symbol result  → ExprSymbol(n) + payload bytes
+  - Compound expression   → ExprArity(n) + children (for `tuple`, `explode_symbol`, `quote`)
+  - Skip signal           → nothing  (e.g. `ifnz` with zero cond and no else)
+
+Args passed to `pure_apply` are stripped of their header (raw payloads).
+
 Mirrors EvalScope::eval in experiments/eval/src/lib.rs.
 """
 function _pure_eval_formula(buf::Vector{UInt8}, off::Int) :: Union{Vector{UInt8}, Nothing}
@@ -393,9 +408,9 @@ function _pure_eval_formula(buf::Vector{UInt8}, off::Int) :: Union{Vector{UInt8}
     tag = byte_item(buf[off])
 
     if tag isa ExprSymbol
-        # Raw symbol — return its bytes as-is (the symbol payload)
+        # Return complete MORK symbol (header + payload)
         n = Int(tag.size)
-        return buf[off+1 : off+n]
+        return buf[off : off+n]
     end
 
     if tag isa ExprArity
@@ -420,45 +435,66 @@ function _pure_eval_formula(buf::Vector{UInt8}, off::Int) :: Union{Vector{UInt8}
         end
 
         # ── ifnz: short-circuit conditional ──────────────────────────
-        # (ifnz <cond> then <nonzero-expr>) or with else branch
         if fn_name == "ifnz" && length(arg_spans) >= 3
-            cond_bytes = _pure_eval_formula(buf, first(arg_spans[1]))
-            cond_bytes === nothing && return nothing
-            is_nz = !all(==(0x00), cond_bytes)
+            cond = _pure_eval_formula(buf, first(arg_spans[1]))
+            cond === nothing && return nothing
+            cond_payload = _pure_strip_header(cond)
+            is_nz = !all(==(0x00), cond_payload)
             # arg_spans[2] is the "then" keyword — skip it
             if is_nz
                 return _pure_eval_formula(buf, first(arg_spans[3]))
             elseif length(arg_spans) == 5
-                # (ifnz cond then expr else expr) — arg_spans[4]="else", arg_spans[5]=else_expr
                 return _pure_eval_formula(buf, first(arg_spans[5]))
             else
-                return nothing   # no else branch → skip (mirrors Err("ifnz no else branch"))
+                return nothing
             end
         end
 
-        # ── quote: return raw bytes without evaluation ────────────────
-        # (' expr) — return the expr bytes verbatim
+        # ── quote: return the inner expression bytes verbatim ─────────
         if fn_name == "'" && length(arg_spans) >= 1
             return buf[arg_spans[1]]
         end
 
-        # ── Standard pure op: evaluate all args eagerly ───────────────
+        # ── Evaluate all args eagerly; pass raw payloads to pure_apply ─
         arg_results = Vector{UInt8}[]
         for span in arg_spans
             r = _pure_eval_formula(buf, first(span))
             r === nothing && return nothing
-            push!(arg_results, r)
+            push!(arg_results, _pure_strip_header(r))
         end
 
-        result = try
+        # Ops that return full MORK expressions (not scalar payloads)
+        if fn_name == "tuple" || fn_name == "explode_symbol"
+            f = get(PURE_OPS, fn_name, nothing)
+            f === nothing && return nothing
+            result_mork = try f(arg_results) catch; return nothing end
+            return result_mork isa Vector{UInt8} ? result_mork : nothing
+        end
+
+        # Standard scalar ops: get payload, wrap as ExprSymbol
+        result_payload = try
             pure_apply(fn_name, arg_results)
         catch
             return nothing
         end
-        return result
+        n = length(result_payload)
+        n == 0 && return nothing
+        return vcat(item_byte(ExprSymbol(UInt8(n))), result_payload)
     end
 
     nothing
+end
+
+"""
+    _pure_strip_header(mork_expr) → Vector{UInt8}
+
+Strip the leading ExprSymbol header byte from a scalar MORK expression to get
+raw payload bytes. For arity expressions (tuple etc.), return as-is.
+"""
+function _pure_strip_header(mork_expr::Vector{UInt8}) :: Vector{UInt8}
+    isempty(mork_expr) && return mork_expr
+    tag = try byte_item(mork_expr[1]) catch; return mork_expr end
+    tag isa ExprSymbol ? mork_expr[2:end] : mork_expr
 end
 
 """
@@ -504,14 +540,9 @@ function sink_apply!(s::PureSink, bindings::Dict, path::Vector{UInt8}, btm::Path
 
     formula_start > length(formula_buf) && return
 
-    # Evaluate the formula — returns raw payload bytes (no ExprSymbol header)
-    result_payload = _pure_eval_formula(formula_buf, formula_start)
-    result_payload === nothing && return
-
-    # Wrap payload as a MORK ExprSymbol expression for substitution into the template
-    n = length(result_payload)
-    result_mork = n > 0 ? vcat(item_byte(ExprSymbol(UInt8(n))), result_payload) :
-                          UInt8[item_byte(ExprNewVar())]  # empty → NewVar placeholder
+    # Evaluate formula — returns a complete MORK sub-expression (header included)
+    result_mork = _pure_eval_formula(formula_buf, formula_start)
+    result_mork === nothing && return
 
     # Substitute: walk template bytes, replace first VarRef/NewVar with result_mork
     tpl_end = _expr_end_offset(tpl_buf, tpl_start)

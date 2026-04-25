@@ -601,9 +601,8 @@ const PURE_OPS = Dict{String, Function}(
 
     # ── symbol ops ───────────────────────────────────────────────────
     "reverse_symbol"  => (a) -> reverse(a[1]),
-    # collapse_symbol: takes ONE argument.
-    # If arg is a MORK arity expression (e.g., from quote '(...)), parse and concat symbol payloads.
-    # Otherwise, concatenate all arg byte arrays (legacy explode_symbol usage).
+    # collapse_symbol: takes ONE argument (raw payload from _pure_strip_header).
+    # Arg may be arity expression bytes (from explode_symbol or quote) or plain bytes.
     # Mirrors collapse_symbol in pure.rs: reads arity-N expression, extracts symbol payloads.
     "collapse_symbol" => function(a)
         buf = a[1]
@@ -624,8 +623,8 @@ const PURE_OPS = Dict{String, Function}(
         end
         reduce(vcat, a; init=UInt8[])
     end,
-    # explode_symbol: takes ONE symbol, returns arity-N MORK expression (one 1-byte symbol per byte).
-    # Mirrors explode_symbol in pure.rs.
+    # explode_symbol: takes ONE symbol payload, returns MORK arity-N expression.
+    # Mirrors explode_symbol in pure.rs. Called by _pure_eval_formula's MORK_EXPR path.
     "explode_symbol"  => function(a)
         payload = a[1]
         n = length(payload)
@@ -634,6 +633,18 @@ const PURE_OPS = Dict{String, Function}(
         for b in payload
             push!(result, item_byte(ExprSymbol(UInt8(1))))
             push!(result, b)
+        end
+        result
+    end,
+    # tuple: takes N arg payloads, returns MORK arity-N expression.
+    # (tuple "0" "1") → [arity(2), sym(1)'0', sym(1)'1']
+    # Mirrors tuple in pure.rs. Called by _pure_eval_formula's MORK_EXPR path.
+    "tuple" => function(a)
+        n = length(a)
+        result = UInt8[item_byte(ExprArity(UInt8(n)))]
+        for payload in a
+            push!(result, item_byte(ExprSymbol(UInt8(length(payload)))))
+            append!(result, payload)
         end
         result
     end,
@@ -646,10 +657,10 @@ const PURE_OPS = Dict{String, Function}(
     "decode_base64url" => (a) -> base64decode(String(a[1])),
 
     # ── control flow ─────────────────────────────────────────────────
+    # ifnz is handled specially in _pure_eval_formula (short-circuit), not via pure_apply
     "ifnz" => (a) -> _read_u64(a[1]) != 0 ? a[2] : a[3],
     "then" => (a) -> a[end],
     "else" => (a) -> a[1],
-    "tuple"=> (a) -> reduce(vcat, a; init=UInt8[]),
 
     # ── expr accessors ────────────────────────────────────────────────
     "nth_expr" => (a) -> begin
