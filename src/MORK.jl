@@ -65,6 +65,12 @@ include("server/Commands.jl")
 # Ports mork/server/src/main.rs.
 include("server/Server.jl")
 
+# ── MorkL VM (experiments/morkl_interpreter/) ─────────────────────────────────
+
+# Register-based VM for relational trie algebra.
+# Ports experiments/morkl_interpreter/src/{lib.rs,cf_iter.rs} (server branch).
+include("morkl/MorkL.jl")
+
 """
     version() -> VersionNumber
 """
