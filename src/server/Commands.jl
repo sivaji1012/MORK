@@ -539,7 +539,10 @@ function cmd_metta_thread(ss::ServerSpace, args::Vector{String}, props::Dict{Str
     try
         loc_expr = sexpr_to_expr(location_str)
         status_loc_str = "(exec $location_str)"
-        status_loc     = Vector{UInt8}(status_loc_str)
+        # Use MORK expression bytes (not raw ASCII) so cmd_status can look it up.
+        # cmd_status derives prefix via _derive_prefix(sexpr_to_expr(expr_str)),
+        # so the key must be the constant prefix of the s-expression "(exec <loc>)".
+        status_loc = _derive_prefix(sexpr_to_expr(status_loc_str))
 
         # Acquire write lock on status location — ensures only one thread runs at that location
         writer = ss_new_writer(ss, status_loc)

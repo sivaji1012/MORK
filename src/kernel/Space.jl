@@ -567,10 +567,18 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
         end
     end
 
+    # Build read_btm: clone s.btm and re-insert the exec atom (add_expr).
+    # Mirrors upstream: `let mut read_copy = self.btm.clone(); read_copy.insert(add.span(), ())`.
+    # This enables self-referential exec rules — the exec atom was removed from s.btm
+    # before interpret was called, but re-inserting it here lets pattern (, (exec ...))
+    # match the atom that triggered the current transform.
+    read_btm = deepcopy(s.btm)
+    set_val_at!(read_btm, add_expr.buf, UNIT_VAL)
+
     # space_query_multi_i uses s.mmaps for ACT file caching (I-pattern)
     query_fn = no_source ? space_query_multi :
                            (btm, pat, v, f) -> space_query_multi_i(btm, pat, v, f; mmaps=s.mmaps)
-    touched  = query_fn(s.btm, pat_expr, pat_v, (bindings, loc_expr) -> begin
+    touched  = query_fn(read_btm, pat_expr, pat_v, (bindings, loc_expr) -> begin
         if no_sink
             # `,` template functor — apply each template and insert result directly
             for ee in template_ees
