@@ -1,6 +1,5 @@
 # test/integration/roman_disjoin_initial.jl — ports fn roman_disjoin_initial() in kernel/src/main.rs
 # Set intersection via 4-source pattern + O remove sink.
-# Upstream asserts specific intersection results; we check key ones.
 using MORK, Test
 
 @testset "roman_disjoin_initial — set intersections via 4-source match" begin
@@ -25,12 +24,12 @@ using MORK, Test
     (, (intersection \$a \$b Nil) (neq Nil \$e2) (intersection \$a \$b \$e2)  )
     (O (- (intersection \$a \$b Nil) ) ) )
     """)
-    # NOTE: exec 0 uses a 4-source pattern — limited by multi-factor ProductZipper.
-    # Cap at 1000 to avoid hang; full result requires multi-factor fix.
-    steps = space_metta_calculus!(s, 1_000)
-    @test steps < 1_000  # terminates (doesn't hang)
+    steps = space_metta_calculus!(s, 100_000)
+    @test steps < 100_000
     result = space_dump_all_sexpr(s)
-    # With current single-source limitation, only partial intersections computed.
-    # TODO: fix multi-factor ProductZipper to get full intersection results.
-    @test space_val_count(s) > 10  # atoms were processed
+    # Upstream asserts these four intersection atoms (mirrors assert in main.rs):
+    @test occursin("(intersection 1 2 Nil)", result)
+    @test occursin("(intersection 1 3 a)", result)
+    @test occursin("(intersection 1 3 b)", result)
+    @test occursin("(intersection 2 3 Nil)", result)
 end
