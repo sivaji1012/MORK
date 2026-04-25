@@ -189,16 +189,13 @@ function cmd_copy(ss::ServerSpace, args::Vector{String}, props::Dict{String,Stri
             ss_release_reader!(ss, reader); return work_error(503, "copy: dest path is locked")
         end
         try
-            # Mirrors wz.graft(&rz) — unconditional subtrie copy src→dst.
-            # Collect src values into a temp PathMap (relative to src_prefix),
-            # then graft the whole map into the dst position.
-            src_pm = PathMap{UnitVal}()
+            # Mirrors wz.graft(&rz) — copy every value from src subtrie to dst.
+            # Read all relative paths under src_prefix, write each at dst_prefix + rel_path.
             rz = read_zipper_at_path(ss.space.btm, src_prefix)
             while zipper_to_next_val!(rz)
-                set_val_at!(src_pm, collect(zipper_path(rz)), UNIT_VAL)
+                rel_path = collect(zipper_path(rz))
+                set_val_at!(ss.space.btm, vcat(dst_prefix, rel_path), UNIT_VAL)
             end
-            wz = write_zipper_at_path(ss.space.btm, dst_prefix)
-            wz_graft_map!(wz, src_pm)   # mirrors wz.graft(&rz) in upstream
         finally
             ss_release_reader!(ss, reader)
             ss_release_writer!(ss, writer)
