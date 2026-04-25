@@ -242,10 +242,27 @@ end
 
 function sink_finalize!(s::CountSink, btm::PathMap{UnitVal}) :: Bool
     cnt = val_count(s.unique)
-    cnt_bytes = Vector{UInt8}(string(cnt))
-    key = vcat(UInt8[item_byte(ExprSymbol(UInt8(length(cnt_bytes))))], cnt_bytes)
-    old = get_val_at(btm, key)
-    set_val_at!(btm, key, UNIT_VAL)
+
+    # Parse (count <template> <var> <source>) — substitute count into template
+    args = ExprEnv[]
+    ee_args!(ExprEnv(UInt8(0), UInt8(0), UInt32(0), s.expr), args)
+    length(args) < 3 && return false
+
+    tpl_ee = args[2]
+    tpl_buf = tpl_ee.base.buf
+    tpl_start = Int(tpl_ee.offset) + 1
+
+    # Encode count as a MORK symbol expression
+    cnt_str = string(cnt)
+    cnt_mork = vcat(item_byte(ExprSymbol(UInt8(length(cnt_str)))), Vector{UInt8}(cnt_str))
+
+    # Substitute count for the first VarRef/NewVar in the template
+    tpl_end = _expr_end_offset(tpl_buf, tpl_start)
+    out = _pure_substitute_first_var(tpl_buf, tpl_start, tpl_end - 1, cnt_mork)
+    out === nothing && return false
+
+    old = get_val_at(btm, out)
+    set_val_at!(btm, out, UNIT_VAL)
     old === nothing
 end
 
@@ -338,18 +355,218 @@ end
 
 struct ACTSink  <: AbstractSink; expr::MORK.Expr; end
 struct WASMSink <: AbstractSink; expr::MORK.Expr; end
-struct PureSink <: AbstractSink; expr::MORK.Expr; end
 struct Z3Sink   <: AbstractSink; expr::MORK.Expr; end
 struct USink    <: AbstractSink; expr::MORK.Expr; end
 struct AUSink   <: AbstractSink; expr::MORK.Expr; end
 struct HashSink <: AbstractSink; expr::MORK.Expr; end
 
-for T in (ACTSink, WASMSink, PureSink, Z3Sink, USink, AUSink, HashSink)
+for T in (ACTSink, WASMSink, Z3Sink, USink, AUSink, HashSink)
     @eval sink_apply!(::$T, ::Dict, ::Vector{UInt8}, ::PathMap{UnitVal}) =
         error($(string(T)) * " not yet ported")
     @eval sink_finalize!(::$T, ::PathMap{UnitVal}) =
         error($(string(T)) * " not yet ported")
 end
+
+# =====================================================================
+# PureSink — port of PureSink in sinks.rs
+# (pure <template> <var> <formula>)
+# Evaluates <formula> using PURE_OPS, substitutes result into <template>,
+# and stores the result in the space.
+# =====================================================================
+
+mutable struct PureSink <: AbstractSink
+    expr    ::MORK.Expr
+    changed ::Bool
+end
+PureSink(e::MORK.Expr) = PureSink(e, false)
+
+"""
+    _pure_eval_formula(buf, off) → Union{Vector{UInt8}, Nothing}
+
+Recursively evaluate a pure-ops formula rooted at byte offset `off` (1-based).
+Returns the result bytes, or `nothing` if evaluation should be skipped
+(e.g. `ifnz` with a zero condition and no else branch).
+Mirrors EvalScope::eval in experiments/eval/src/lib.rs.
+"""
+function _pure_eval_formula(buf::Vector{UInt8}, off::Int) :: Union{Vector{UInt8}, Nothing}
+    off > length(buf) && return nothing
+    tag = byte_item(buf[off])
+
+    if tag isa ExprSymbol
+        # Raw symbol — return its bytes as-is (the symbol payload)
+        n = Int(tag.size)
+        return buf[off+1 : off+n]
+    end
+
+    if tag isa ExprArity
+        n_args = Int(tag.arity) - 1   # first child is the functor name
+        n_args < 0 && return nothing
+
+        # Parse functor name
+        fn_off = off + 1
+        fn_tag = byte_item(buf[fn_off])
+        fn_tag isa ExprSymbol || return nothing
+        fn_size = Int(fn_tag.size)
+        fn_name = String(buf[fn_off+1 : fn_off+fn_size])
+
+        # Collect arg byte spans
+        arg_spans = UnitRange{Int}[]
+        cur = fn_off + 1 + fn_size
+        for _ in 1:n_args
+            cur > length(buf) && break
+            span_end = _expr_end_offset(buf, cur)
+            push!(arg_spans, cur:span_end-1)
+            cur = span_end
+        end
+
+        # ── ifnz: short-circuit conditional ──────────────────────────
+        # (ifnz <cond> then <nonzero-expr>) or with else branch
+        if fn_name == "ifnz" && length(arg_spans) >= 3
+            cond_bytes = _pure_eval_formula(buf, first(arg_spans[1]))
+            cond_bytes === nothing && return nothing
+            is_nz = !all(==(0x00), cond_bytes)
+            # arg_spans[2] is the "then" keyword — skip it
+            if is_nz
+                return _pure_eval_formula(buf, first(arg_spans[3]))
+            elseif length(arg_spans) == 5
+                # (ifnz cond then expr else expr) — arg_spans[4]="else", arg_spans[5]=else_expr
+                return _pure_eval_formula(buf, first(arg_spans[5]))
+            else
+                return nothing   # no else branch → skip (mirrors Err("ifnz no else branch"))
+            end
+        end
+
+        # ── quote: return raw bytes without evaluation ────────────────
+        # (' expr) — return the expr bytes verbatim
+        if fn_name == "'" && length(arg_spans) >= 1
+            return buf[arg_spans[1]]
+        end
+
+        # ── Standard pure op: evaluate all args eagerly ───────────────
+        arg_results = Vector{UInt8}[]
+        for span in arg_spans
+            r = _pure_eval_formula(buf, first(span))
+            r === nothing && return nothing
+            push!(arg_results, r)
+        end
+
+        result = try
+            pure_apply(fn_name, arg_results)
+        catch
+            return nothing
+        end
+        return result
+    end
+
+    nothing
+end
+
+"""
+    _expr_end_offset(buf, off) → Int
+
+Return the offset just past the expression starting at `off` (exclusive end).
+"""
+function _expr_end_offset(buf::Vector{UInt8}, off::Int) :: Int
+    off > length(buf) && return off
+    tag = byte_item(buf[off])
+    if tag isa ExprSymbol
+        return off + 1 + Int(tag.size)
+    elseif tag isa ExprArity
+        cur = off + 1
+        for _ in 1:Int(tag.arity)
+            cur > length(buf) && break
+            cur = _expr_end_offset(buf, cur)
+        end
+        return cur
+    elseif tag isa ExprNewVar || tag isa ExprVarRef
+        return off + 1
+    end
+    off + 1
+end
+
+function sink_apply!(s::PureSink, bindings::Dict, path::Vector{UInt8}, btm::PathMap{UnitVal})
+    buf = s.expr.buf
+    length(buf) < 2 || byte_item(buf[1]) isa ExprArity || return
+
+    # Parse (pure <template> <var> <formula>) — 4 children
+    args = ExprEnv[]
+    ee_args!(ExprEnv(UInt8(0), UInt8(0), UInt32(0), s.expr), args)
+    length(args) < 4 && return
+
+    # Extract sub-expression byte spans
+    tpl_ee     = args[2]
+    formula_ee = args[4]
+
+    tpl_start     = Int(tpl_ee.offset) + 1
+    formula_start = Int(formula_ee.offset) + 1
+    tpl_buf     = tpl_ee.base.buf
+    formula_buf = formula_ee.base.buf
+
+    formula_start > length(formula_buf) && return
+
+    # Evaluate the formula — returns raw payload bytes (no ExprSymbol header)
+    result_payload = _pure_eval_formula(formula_buf, formula_start)
+    result_payload === nothing && return
+
+    # Wrap payload as a MORK ExprSymbol expression for substitution into the template
+    n = length(result_payload)
+    result_mork = n > 0 ? vcat(item_byte(ExprSymbol(UInt8(n))), result_payload) :
+                          UInt8[item_byte(ExprNewVar())]  # empty → NewVar placeholder
+
+    # Substitute: walk template bytes, replace first VarRef/NewVar with result_mork
+    tpl_end = _expr_end_offset(tpl_buf, tpl_start)
+    out = _pure_substitute_first_var(tpl_buf, tpl_start, tpl_end - 1, result_mork)
+    out === nothing && return
+
+    old = get_val_at(btm, out)
+    set_val_at!(btm, out, UNIT_VAL)
+    old === nothing && (s.changed = true)
+end
+
+"""
+    _pure_substitute_first_var(buf, from, to, replacement) → Vector{UInt8}
+
+Walk the expression in buf[from:to], replacing the first VarRef or NewVar
+with `replacement` bytes. Returns the resulting byte vector, or `nothing`
+if no variable slot was found.
+"""
+function _pure_substitute_first_var(buf::Vector{UInt8}, from::Int, to::Int,
+                                     replacement::Vector{UInt8}) :: Union{Vector{UInt8}, Nothing}
+    out = UInt8[]
+    found = Ref(false)
+    _pure_copy_subst!(buf, from, to, replacement, out, found)
+    found[] ? out : nothing
+end
+
+function _pure_copy_subst!(buf::Vector{UInt8}, from::Int, to::Int,
+                            repl::Vector{UInt8}, out::Vector{UInt8}, found::Ref{Bool})
+    from > to && return
+    tag = byte_item(buf[from])
+    if (tag isa ExprNewVar || tag isa ExprVarRef) && !found[]
+        append!(out, repl)
+        found[] = true
+        return
+    end
+    if tag isa ExprSymbol
+        n = Int(tag.size)
+        append!(out, buf[from : from + n])
+        return
+    end
+    if tag isa ExprArity
+        push!(out, buf[from])
+        cur = from + 1
+        for _ in 1:Int(tag.arity)
+            cur > to && break
+            child_end = _expr_end_offset(buf, cur) - 1
+            _pure_copy_subst!(buf, cur, child_end, repl, out, found)
+            cur = child_end + 1
+        end
+        return
+    end
+    push!(out, buf[from])
+end
+
+sink_finalize!(s::PureSink, ::PathMap{UnitVal}) = (c = s.changed; s.changed = false; c)
 
 # Float reduction sinks
 struct FloatReductionSink{R} <: AbstractSink
@@ -451,6 +668,12 @@ function asink_new(e::MORK.Expr) :: AbstractSink
         return FloatReductionSink(e, :prod)
     end
 
+    # [4] pure → PureSink
+    if a1 == item_byte(ExprArity(UInt8(4))) && a2 == item_byte(ExprSymbol(UInt8(4))) &&
+       length(buf) >= 6 && buf[3:6] == Vector{UInt8}("pure")
+        return PureSink(e)
+    end
+
     # [3] ACT → ACTSink
     if a1 == item_byte(ExprArity(UInt8(3))) && a2 == item_byte(ExprSymbol(UInt8(3))) &&
        length(buf) >= 5 && buf[3:5] == Vector{UInt8}("ACT")
@@ -476,5 +699,6 @@ export AbstractSink, sink_apply!, sink_finalize!
 export CompatSink, AddSink, RemoveSink, HeadSink
 export CountSink, SumSink, AndSink
 export ACTSink, WASMSink, PureSink, Z3Sink, USink, AUSink, HashSink
+export _pure_eval_formula, _expr_end_offset
 export FloatReductionSink
 export asink_new, asink_compat
