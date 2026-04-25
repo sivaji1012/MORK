@@ -343,40 +343,71 @@ function cmd_import(ss::ServerSpace, args::Vector{String}, props::Dict{String,St
     try
         pat    = sexpr_to_expr(pat_str)
         tpl    = sexpr_to_expr(tpl_str)
-        writer = ss_new_writer(ss, UInt8[])
+        # Lock at template prefix (not root) — mirrors till_constant_to_full in upstream
+        tpl_prefix = _derive_prefix(tpl)
+        writer = ss_new_writer(ss, tpl_prefix)
         writer === nothing && return work_error(503, "import: space is locked for writing")
 
-        # Allocate a ResourceHandle to track the in-progress download on disk.
-        # Mirrors ctx.0.resource_store.new_resource(file_uri, cmd.cmd_id) in commands.rs.
         cmd_id      = _ss_next_cmd_id!(ss)
         file_handle = rs_new_resource(ss.resource_store, uri, cmd_id)
 
         Threads.@spawn begin
             try
-                resp = HTTP.get(uri)
+                # Fetch URL → write to disk
+                resp = try
+                    HTTP.get(uri; readtimeout=30)
+                catch e
+                    ss_set_status!(ss, tpl_prefix, StatusRecord(STATUS_FETCH_ERROR, "fetch failed: $e"))
+                    close(file_handle)
+                    return
+                end
+                if resp.status < 200 || resp.status >= 300
+                    ss_set_status!(ss, tpl_prefix, StatusRecord(STATUS_FETCH_ERROR, "HTTP $(resp.status)"))
+                    close(file_handle)
+                    return
+                end
                 data = resp.body
-
-                # Stream to disk via the ResourceHandle, then read back.
-                # Mirrors do_import's BufWriter → file_resource.path() pattern.
                 write(rh_path(file_handle), data)
 
-                n = if fmt == FMT_METTA
-                    space_add_sexpr!(ss.space, data, pat, tpl)
-                elseif fmt == FMT_CSV
-                    space_load_csv!(ss.space, data, pat, tpl)
-                elseif fmt == FMT_JSON
-                    space_load_json!(ss.space, data)
+                # Detect format from URI extension (mirrors detect_file_type in upstream).
+                # If the ?format= property was explicitly set use it; otherwise auto-detect.
+                # Unknown extensions (e.g. .md, .txt) → parseError immediately.
+                uri_lc = lowercase(uri)
+                detect_fmt = if fmt != FMT_METTA
+                    fmt   # explicitly set by caller
+                elseif endswith(uri_lc, ".metta")
+                    FMT_METTA
+                elseif endswith(uri_lc, ".csv")
+                    FMT_CSV
+                elseif endswith(uri_lc, ".json")
+                    FMT_JSON
                 else
-                    0
+                    # Unknown extension — cannot determine format → parseError
+                    ss_set_status!(ss, tpl_prefix,
+                        StatusRecord(STATUS_PARSE_ERROR, "unrecognized file format for URI: $uri"))
+                    close(file_handle)
+                    return
                 end
 
-                ss_set_status!(ss, UInt8[], StatusRecord(STATUS_COUNT_RESULT, string(n), n))
-                # Finalize resource: rename in-progress file with real timestamp.
-                rh_finalize!(file_handle, UInt64(time_ns()))
-
+                try
+                    if detect_fmt == FMT_METTA
+                        space_add_sexpr!(ss.space, data, pat, tpl)
+                    elseif detect_fmt == FMT_CSV
+                        space_load_csv!(ss.space, data, pat, tpl)
+                    elseif detect_fmt == FMT_JSON
+                        space_load_json!(ss.space, data)
+                    end
+                    rh_finalize!(file_handle, UInt64(time_ns()))
+                    # On success writer release → status reverts to pathClear automatically
+                catch pe
+                    ss_set_status!(ss, tpl_prefix,
+                        StatusRecord(STATUS_PARSE_ERROR, "parse failed: $pe"))
+                    close(file_handle)
+                end
             catch e
-                ss_set_status!(ss, UInt8[], StatusRecord(STATUS_FETCH_ERROR, string(e)))
-                close(file_handle)   # cleanup in-progress file on error
+                @error "import spawn error" exception=(e, catch_backtrace())
+                ss_set_status!(ss, tpl_prefix, StatusRecord(STATUS_FETCH_ERROR, "import error: $e"))
+                close(file_handle)
             finally
                 ss_release_writer!(ss, writer)
             end
