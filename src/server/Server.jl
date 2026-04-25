@@ -77,9 +77,10 @@ function _handle_request(server::MorkServer, req::HTTP.Request) :: HTTP.Response
 
     # Root path — return API index with clickable links
     if isempty(cmd_name)
-        host_display = server.addr == "0.0.0.0" ? "localhost" : server.addr
-        base_url = "http://$(host_display):$(server.port)"
-        commands = sort(collect(keys(COMMAND_TABLE)))
+        # Use the Host header so links work correctly from any machine (Windows, etc.)
+        host_hdr  = HTTP.header(req, "Host", "$(server.addr == "0.0.0.0" ? "localhost" : server.addr):$(server.port)")
+        base_url  = "http://$(host_hdr)"
+        commands  = sort(collect(keys(COMMAND_TABLE)))
         cmd_links = join(["<li><a href=\"/$c\"><code>/$c</code></a></li>" for c in commands])
         html = """<!DOCTYPE html><html><head><title>MORK Server</title></head><body>
 <h2>MORK Server v$(MORK.version())</h2>
