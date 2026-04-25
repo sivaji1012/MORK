@@ -76,7 +76,7 @@ function _handle_request(server::MorkServer, req::HTTP.Request) :: HTTP.Response
 <p>Requests: $(server.request_counter[])  |  Space size: $(space_val_count(server.ss.space)) expressions</p>
 <h3>Commands</h3><ul>""" * join(["<li><code>/$c</code></li>" for c in commands]) * """</ul>
 <h3>Quick check</h3>
-<pre>curl http://$(server.addr):$(server.port)/status/-</pre>
+<pre>curl http://$(server.addr == "0.0.0.0" ? "localhost" : server.addr):$(server.port)/status/-</pre>
 </body></html>"""
         return HTTP.Response(200, ["Content-Type" => "text/html"], html)
     end
