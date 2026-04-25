@@ -241,12 +241,13 @@ end
 # focus_token is opaque bytes for iterative exploration.
 # =====================================================================
 function cmd_explore(ss::ServerSpace, args::Vector{String}, props::Dict{String,String}, body::Vector{UInt8})
-    length(args) < 2 && return work_error(400, "explore: expected expr and focus_token")
-    expr_str    = args[1]
-    # focus_token is opaque raw bytes returned by a prior /explore call.
-    # The URL segment is percent-encoded; after unescaping we may have non-UTF-8
-    # bytes. Treat as Latin-1 (each codeunit = one byte) to avoid UTF-8 errors.
-    focus_token = Vector{UInt8}(codeunits(args[2]))
+    isempty(args) && return work_error(400, "explore: expected expr argument")
+    expr_str = args[1]
+    # Empty token = begin exploration from root. Trailing '/' in URL creates
+    # empty segment which is filtered out — treat missing token as UInt8[].
+    # Non-empty token is opaque bytes from a prior /explore response;
+    # use codeunits (not String) to handle non-UTF-8 byte values correctly.
+    focus_token = length(args) >= 2 ? Vector{UInt8}(codeunits(args[2])) : UInt8[]
 
     try
         expr   = sexpr_to_expr(expr_str)
