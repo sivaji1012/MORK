@@ -149,9 +149,17 @@ function cmd_clear(ss::ServerSpace, args::Vector{String}, props::Dict{String,Str
         writer = ss_new_writer(ss, prefix)
         writer === nothing && return work_error(503, "clear: path is locked")
         try
-            # Remove all values at this prefix (mirrors wz.remove_branches + wz.remove_val)
-            wz = write_zipper_at_path(ss.space.btm, prefix)
-            wz_remove_val!(wz, true)
+            # Collect all paths under prefix, then remove each one.
+            # Mirrors upstream wz.remove_branches + wz.remove_val via
+            # iteration instead of direct bulk-remove (handles node misalignment).
+            rz = read_zipper_at_path(ss.space.btm, prefix)
+            paths = Vector{UInt8}[]
+            while zipper_to_next_val!(rz)
+                push!(paths, copy(rz.prefix_buf))
+            end
+            for p in paths
+                remove_val_at!(ss.space.btm, p)
+            end
         finally
             ss_release_writer!(ss, writer)
         end
