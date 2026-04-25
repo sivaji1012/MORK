@@ -613,18 +613,115 @@ end
 sink_finalize!(s::PureSink, ::PathMap{UnitVal}) = (c = s.changed; s.changed = false; c)
 
 # Float reduction sinks
-struct FloatReductionSink{R} <: AbstractSink
-    expr ::MORK.Expr
-    op   ::Symbol   # :sum, :min, :max, :prod
+# Mirrors FloatReductionSink<Sum/Min/Max/Prod> in sinks.rs.
+# Template format: (fsum (result-tpl) $c $x) where:
+#   arg2 = result template  (e.g. "(sum $c)")
+#   arg3 = key/context var  ($c — groups the reduction)
+#   arg4 = value            ($x — the numeric value, already substituted)
+mutable struct FloatReductionSink{R} <: AbstractSink
+    expr       ::MORK.Expr
+    op         ::Symbol   # :sum, :min, :max, :prod
+    # Groups: (key_bytes → Vector{Float64})
+    by_key     ::Vector{Tuple{Vector{UInt8}, Vector{Float64}}}
 end
 
-FloatReductionSink(e::MORK.Expr, op::Symbol) = FloatReductionSink{op}(e, op)
+FloatReductionSink(e::MORK.Expr, op::Symbol) = FloatReductionSink{op}(e, op, Tuple{Vector{UInt8}, Vector{Float64}}[])
 
-function sink_apply!(s::FloatReductionSink, bindings, path, btm)
-    # TODO: float extraction and reduction
+function sink_apply!(s::FloatReductionSink, bindings, path::Vector{UInt8}, btm)
+    # path = bound expression bytes: (fXXX <tpl> <key> <value>)
+    length(path) < 5 && return
+    args = ExprEnv[]
+    ee_args!(ExprEnv(UInt8(0), UInt8(0), UInt32(0), MORK.Expr(path)), args)
+    length(args) < 4 && return
+
+    # Extract key bytes (arg3) — the group-by variable/value
+    key_start = Int(args[3].offset) + 1
+    key_end   = _expr_end_offset(path, key_start)
+    key_bytes = path[key_start : key_end-1]
+
+    # Extract value bytes (arg4) — should be a Symbol containing a float string
+    val_start = Int(args[4].offset) + 1
+    val_start > length(path) && return
+    vtag = byte_item(path[val_start])
+    vtag isa ExprSymbol || return
+    val_str = String(path[val_start+1 : val_start + Int(vtag.size)])
+    fval = tryparse(Float64, val_str)
+    fval === nothing && return
+
+    # Find or create the entry for this key
+    idx = findfirst(t -> t[1] == key_bytes, s.by_key)
+    if idx === nothing
+        push!(s.by_key, (key_bytes, Float64[]))
+        idx = length(s.by_key)
+    end
+    push!(s.by_key[idx][2], fval)
 end
 
-sink_finalize!(::FloatReductionSink, ::PathMap{UnitVal}) = false
+function sink_finalize!(s::FloatReductionSink, btm::PathMap{UnitVal}) :: Bool
+    isempty(s.by_key) && return false
+    changed = false
+    op = s.op
+
+    # Extract result template (arg2 of the sink expression)
+    args = ExprEnv[]
+    ee_args!(ExprEnv(UInt8(0), UInt8(0), UInt32(0), s.expr), args)
+    length(args) < 2 && return false
+    tpl_start = Int(args[2].offset) + 1
+    tpl_buf   = args[2].base.buf
+    tpl_end   = _expr_end_offset(tpl_buf, tpl_start)
+    tpl_bytes = tpl_buf[tpl_start : tpl_end-1]
+
+    for (key_bytes, values) in s.by_key
+        isempty(values) && continue
+        result = if op === :sum
+            sum(values)
+        elseif op === :min
+            minimum(values)
+        elseif op === :max
+            maximum(values)
+        elseif op === :prod
+            prod(values)
+        else
+            continue
+        end
+
+        # Format result as a MORK symbol
+        result_str  = string(result)
+        result_mork = vcat(item_byte(ExprSymbol(UInt8(length(result_str)))),
+                           Vector{UInt8}(result_str))
+
+        # Substitute result into the template:
+        # If key_bytes is a variable (NewVar/VarRef), substitute result directly.
+        # Otherwise, prepend key_bytes and append result (result stored as key→result).
+        if length(key_bytes) == 1 && (byte_item(key_bytes[1]) isa ExprNewVar ||
+                                       byte_item(key_bytes[1]) isa ExprVarRef)
+            # Free context variable — substitute result into template's first var
+            out = _pure_substitute_first_var(tpl_bytes, 1, length(tpl_bytes), result_mork)
+            out === nothing && continue
+            old = get_val_at(btm, out)
+            set_val_at!(btm, out, UNIT_VAL)
+            old === nothing && (changed = true)
+        else
+            # Bound key — substitute key into template, then append result
+            # Produces: (sum <key_value> <result>)
+            # First sub the key into the template
+            keyed = _pure_substitute_first_var(tpl_bytes, 1, length(tpl_bytes), key_bytes)
+            keyed === nothing && continue
+            # Append result value as next atom
+            out_bytes = vcat(keyed, result_mork)
+            # Adjust the arity of the outermost expression
+            if !isempty(out_bytes) && byte_item(out_bytes[1]) isa ExprArity
+                old_arity = Int(byte_item(out_bytes[1]).arity)
+                out_bytes[1] = item_byte(ExprArity(UInt8(old_arity + 1)))
+            end
+            old = get_val_at(btm, out_bytes)
+            set_val_at!(btm, out_bytes, UNIT_VAL)
+            old === nothing && (changed = true)
+        end
+    end
+    empty!(s.by_key)
+    changed
+end
 
 # =====================================================================
 # ASink — dispatch union
