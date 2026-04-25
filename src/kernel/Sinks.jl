@@ -230,50 +230,63 @@ end
 """
     CountSink
 
-Count unique matched expressions and store the count at a fixed key.
+Count unique source values per output template, then store the count.
 Mirrors `CountSink` in sinks.rs.
+
+Accumulating sink: sink_apply! collects sources, sink_finalize! counts and writes.
+Used by space_transform_multi_multi! as a persistent sink (not per-match).
 """
 mutable struct CountSink <: AbstractSink
-    expr    ::MORK.Expr
-    unique  ::PathMap{UnitVal}
-    skip    ::Int
+    expr        ::MORK.Expr
+    # Groups: (template_bytes → unique_sources PathMap)
+    # Each template may be different across matches (different outer bindings).
+    by_template ::Vector{Tuple{Vector{UInt8}, PathMap{UnitVal}}}
 end
 
-function CountSink(e::MORK.Expr)
-    # [4] count <result> <source> <pattern> — skip varies
-    CountSink(e, PathMap{UnitVal}(), 0)
-end
+CountSink(e::MORK.Expr) = CountSink(e, Tuple{Vector{UInt8}, PathMap{UnitVal}}[])
 
 function sink_apply!(s::CountSink, bindings::Dict{ExprVar,ExprEnv},
                      path::Vector{UInt8}, btm::PathMap{UnitVal})
-    set_val_at!(s.unique, path, UNIT_VAL)
+    # path = bound expression bytes: (count <template> <var> <source>)
+    # Parse the 4-arg count expression to extract template and source.
+    length(path) < 7 && return
+    args = ExprEnv[]
+    ee_args!(ExprEnv(UInt8(0), UInt8(0), UInt32(0), MORK.Expr(path)), args)
+    length(args) < 4 && return
+
+    # Extract template bytes (arg2) and source bytes (arg4)
+    tpl_start = Int(args[2].offset) + 1
+    tpl_end   = _expr_end_offset(path, tpl_start)
+    tpl_bytes = path[tpl_start : tpl_end-1]
+
+    src_start = Int(args[4].offset) + 1
+    src_end   = _expr_end_offset(path, src_start)
+    src_bytes = path[src_start : src_end-1]
+
+    # Find or create the entry for this template
+    entry = findfirst(t -> t[1] == tpl_bytes, s.by_template)
+    if entry === nothing
+        push!(s.by_template, (tpl_bytes, PathMap{UnitVal}()))
+        entry = length(s.by_template)
+    end
+    set_val_at!(s.by_template[entry][2], src_bytes, UNIT_VAL)
 end
 
 function sink_finalize!(s::CountSink, btm::PathMap{UnitVal}) :: Bool
-    cnt = val_count(s.unique)
-
-    # Parse (count <template> <var> <source>) — substitute count into template
-    args = ExprEnv[]
-    ee_args!(ExprEnv(UInt8(0), UInt8(0), UInt32(0), s.expr), args)
-    length(args) < 3 && return false
-
-    tpl_ee = args[2]
-    tpl_buf = tpl_ee.base.buf
-    tpl_start = Int(tpl_ee.offset) + 1
-
-    # Encode count as a MORK symbol expression
-    cnt_str = string(cnt)
-    cnt_mork = vcat(item_byte(ExprSymbol(UInt8(length(cnt_str)))), Vector{UInt8}(cnt_str))
-
-    # Substitute count for the first VarRef/NewVar in the template
-    tpl_end = _expr_end_offset(tpl_buf, tpl_start)
-    out = _pure_substitute_first_var(tpl_buf, tpl_start, tpl_end - 1, cnt_mork)
-    out === nothing && return false
-
-    old = get_val_at(btm, out)
-    set_val_at!(btm, out, UNIT_VAL)
-    old === nothing
+    changed = false
+    for (tpl_bytes, sources) in s.by_template
+        cnt     = val_count(sources)
+        cnt_str = string(cnt)
+        cnt_mork = vcat(item_byte(ExprSymbol(UInt8(length(cnt_str)))), Vector{UInt8}(cnt_str))
+        out = _pure_substitute_first_var(tpl_bytes, 1, length(tpl_bytes), cnt_mork)
+        out === nothing && continue
+        old = get_val_at(btm, out)
+        set_val_at!(btm, out, UNIT_VAL)
+        old === nothing && (changed = true)
+    end
+    changed
 end
+
 
 # =====================================================================
 # SumSink — [4] sum <result_sym> <source_sym> <expr>: sum matched values

@@ -522,6 +522,19 @@ instead of `apply_e`.
 Returns `(touched, any_new)` where `touched` is match count and `any_new`
 indicates whether at least one new expression was added.
 """
+# Returns true if the O-template raw bytes indicate an accumulating sink (CountSink).
+# Accumulating sinks must be created ONCE before the query and finalized ONCE after.
+function _is_accumulating_sink(raw_bytes::Vector{UInt8}) :: Bool
+    length(raw_bytes) < 7 && return false
+    t1 = byte_item(raw_bytes[1])
+    t1 isa ExprArity || return false
+    t2 = byte_item(raw_bytes[2])
+    t2 isa ExprSymbol || return false
+    sz = Int(t2.size)
+    sz == 5 && length(raw_bytes) >= 7 && raw_bytes[3:7] == UInt8[UInt8('c'),UInt8('o'),UInt8('u'),UInt8('n'),UInt8('t')] && return true
+    false
+end
+
 # Mirrors transform_multi_multi_io(pat_expr, tpl_expr, add, no_source, no_sink)
 # no_source=true  → pattern is `,`  (query the trie — compat path)
 # no_source=false → pattern is `I`  (external ACT/Z3 source via query_multi_i;
@@ -540,6 +553,20 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
     template_ees = tpl_args[2:end]
 
     any_new  = Ref(false)
+
+    # Pre-create persistent (accumulating) sinks for O-templates.
+    # CountSink accumulates sources across all matches before finalizing once.
+    # Other sinks are created fresh per match (persistent_sinks[k] = nothing).
+    persistent_sinks = if no_sink
+        nothing
+    else
+        map(template_ees) do ee
+            tpl_span = expr_span(ee.base, Int(ee.offset) + 1)
+            raw_bytes = Vector{UInt8}(tpl_span)
+            _is_accumulating_sink(raw_bytes) ? asink_new(MORK.Expr(raw_bytes)) : nothing
+        end
+    end
+
     # space_query_multi_i uses s.mmaps for ACT file caching (I-pattern)
     query_fn = no_source ? space_query_multi :
                            (btm, pat, v, f) -> space_query_multi_i(btm, pat, v, f; mmaps=s.mmaps)
@@ -560,8 +587,9 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
                 old === nothing && (any_new[] = true)
             end
         else
-            # `O` template functor — apply each template then dispatch to sink
-            for ee in template_ees
+            # `O` template functor — apply each template then dispatch to sink.
+            # Accumulating sinks (CountSink) use persistent_sinks created before query.
+            for (k, ee) in enumerate(template_ees)
                 tpl_span = expr_span(ee.base, Int(ee.offset) + 1)
                 tpl_e = MORK.Expr(Vector{UInt8}(tpl_span))
                 out_buf = Vector{UInt8}(undef, max(length(tpl_span) * 4, 64))
@@ -570,14 +598,29 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
                 expr_apply(UInt8(0), ee.v, UInt8(0), ez, bindings, oz,
                            Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
                 result_expr = MORK.Expr(oz.root.buf[1:oz.loc-1])
-                sink = asink_new(result_expr)
-                sink_apply!(sink, bindings, result_expr.buf, s.btm)
-                changed = sink_finalize!(sink, s.btm)
-                changed && (any_new[] = true)
+                if persistent_sinks[k] !== nothing
+                    # Accumulating sink: apply but don't finalize yet
+                    sink_apply!(persistent_sinks[k], bindings, result_expr.buf, s.btm)
+                else
+                    # Immediate sink: create fresh, apply, finalize
+                    sink = asink_new(result_expr)
+                    sink_apply!(sink, bindings, result_expr.buf, s.btm)
+                    changed = sink_finalize!(sink, s.btm)
+                    changed && (any_new[] = true)
+                end
             end
         end
         true
     end)
+
+    # Finalize accumulating sinks (CountSink etc.) once after all matches
+    if !no_sink
+        for sink in persistent_sinks
+            sink === nothing && continue
+            changed = sink_finalize!(sink, s.btm)
+            changed && (any_new[] = true)
+        end
+    end
 
     (touched, any_new[])
 end

@@ -39,7 +39,6 @@ using MORK, Test
     @test contains(res, "(rest (Outer (Inner \"piranha\")))")
     @test contains(res, "(rest (Outer (Inner \"capybara\")))")
     @test contains(res, "(found_capybara (Outer (Inner \"capybara\")))")
-    # CountSink accumulation across matches: upstream expects count=2 total,
-    # our per-match finalize gives count=1 per match — both produce "found Inner" entries
-    @test contains(res, "found Inner")
+    # CountSink now accumulates across all matches → count=2 matches upstream assert
+    @test contains(res, "found Inner (Outer") && any(contains(l, "2") for l in filter(l->contains(l,"found Inner"), split(res,"\n")))
 end
