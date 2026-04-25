@@ -42,10 +42,11 @@ end
 # =====================================================================
 
 function _split_command(path::String) :: Tuple{String, Vector{String}}
-    # Strip leading slash, split on /
+    # Strip leading slash, split on /, URL-decode each segment
     parts = filter!(!isempty, split(lstrip(path, '/'), '/'))
     isempty(parts) && return ("", String[])
-    String(parts[1]), String.(parts[2:end])
+    decoded = [HTTP.URIs.unescapeuri(String(p)) for p in parts]
+    decoded[1], decoded[2:end]
 end
 
 function _parse_query(uri::HTTP.URI) :: Dict{String,String}
@@ -73,17 +74,15 @@ function _handle_request(server::MorkServer, req::HTTP.Request) :: HTTP.Response
         return HTTP.Response(200, "shutting down")
     end
 
-    handler = get(COMMAND_TABLE, cmd_name, nothing)
-    if handler === nothing
+    entry = get(COMMAND_TABLE, cmd_name, nothing)
+    if entry === nothing
         return HTTP.Response(404, "Unknown command: $cmd_name")
     end
 
+    _http_method, handler_fn = entry
+
     result = try
-        if cmd_name == "import"
-            handler(server.ss, args, body, query_params)
-        else
-            handler(server.ss, args, body)
-        end
+        handler_fn(server.ss, args, query_params, body)
     catch e
         (:error, 500, "Internal error: $e")
     end

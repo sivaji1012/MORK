@@ -54,8 +54,23 @@ function status_blocks_reader(s::StatusRecord) :: Bool
     s.kind in (PATH_READ_ONLY, PATH_READ_ONLY_TEMPORARY, PATH_FORBIDDEN, PATH_FORBIDDEN_TEMPORARY)
 end
 
+# Mirrors upstream #[serde(rename_all = "camelCase")] on StatusRecord variants
+const _STATUS_KIND_JSON = Dict(
+    PATH_CLEAR               => "pathClear",
+    PATH_READ_ONLY           => "pathReadOnly",
+    PATH_READ_ONLY_TEMPORARY => "pathReadOnlyTemporary",
+    PATH_FORBIDDEN           => "pathForbidden",
+    PATH_FORBIDDEN_TEMPORARY => "pathForbiddenTemporary",
+    SERVER_SHUTDOWN          => "serverShutdown",
+    STATUS_COUNT_RESULT      => "countResult",
+    STATUS_FETCH_ERROR       => "fetchError",
+    STATUS_PARSE_ERROR       => "parseError",
+    STATUS_EXEC_ERROR        => "execError",
+)
+
 function status_to_json(s::StatusRecord) :: String
-    d = Dict("status" => string(s.kind), "message" => s.message)
+    d = Dict{String,Any}("status" => get(_STATUS_KIND_JSON, s.kind, string(s.kind)),
+                          "message" => s.message)
     s.count !== nothing && (d["count"] = s.count)
     JSON3.write(d)
 end

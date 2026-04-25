@@ -21,7 +21,7 @@ mutable struct ListMap{K,V}
 end
 
 ListMap{K,V}() where {K,V} = ListMap{K,V}(Tuple{K,V}[])
-ListMap(pairs::Vector{Tuple{K,V}}) where {K,V} = ListMap{K,V}(copy(pairs))
+ListMap(pairs::AbstractVector{Tuple{K,V}}) where {K,V} = ListMap{K,V}(Vector{Tuple{K,V}}(pairs))
 
 function lm_get(m::ListMap{K,V}, key::K) :: Union{V,Nothing} where {K,V}
     for (k, v) in m.list
