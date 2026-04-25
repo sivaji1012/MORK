@@ -208,6 +208,10 @@ end
 function _expr_unify_core!(stack::Vector{Tuple{ExprEnv, ExprEnv}},
                             bindings::Dict{ExprVar, ExprEnv}) :: Union{Dict{ExprVar, ExprEnv}, UnificationFailure}
     iters    = 0
+    # encountered: deduplicates structural child pairs to break cyclic chains.
+    # Mirrors the `encountered` HashSet<(ExprEnv,ExprEnv)> in the Rust `unify`.
+    # Key = (base_id1, offset1, n1, v1, base_id2, offset2, n2, v2)
+    encountered = Set{NTuple{8,UInt64}}()
 
     # deref: follow chain of bindings
     function _deref(t::ExprEnv) :: ExprEnv
@@ -279,11 +283,26 @@ function _expr_unify_core!(stack::Vector{Tuple{ExprEnv, ExprEnv}},
                 if tag1.arity != tag2.arity
                     return UnificationFailure(Val(:difference), dt1, dt2)
                 end
-                # push child pairs
+                # push child pairs with deduplication (mirrors Rust encountered set)
                 children1 = ExprEnv[]; ee_args!(dt1, children1)
                 children2 = ExprEnv[]; ee_args!(dt2, children2)
                 for i in length(children1):-1:1
-                    push!(stack, (children1[i], children2[i]))
+                    c1 = children1[i]; c2 = children2[i]
+                    v1 = ee_var_opt(c1); v2 = ee_var_opt(c2)
+                    # Always push unbound-variable pairs (mirrors Rust special case)
+                    if v1 !== nothing && v2 !== nothing && _is_unbound(v1) && _is_unbound(v2)
+                        push!(stack, (c1, c2))
+                    else
+                        # Deduplicate: skip pair already in encountered
+                        key = (UInt64(objectid(c1.base.buf)), UInt64(c1.offset),
+                               UInt64(c1.n), UInt64(c1.v),
+                               UInt64(objectid(c2.base.buf)), UInt64(c2.offset),
+                               UInt64(c2.n), UInt64(c2.v))
+                        if key ∉ encountered
+                            push!(encountered, key)
+                            push!(stack, (c1, c2))
+                        end
+                    end
                 end
             end
             # NewVar/VarRef pairs handled below; symbol/arity matched above

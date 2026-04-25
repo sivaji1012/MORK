@@ -2,7 +2,7 @@
 # Equational logic: bi-directional equation search reaches exactly 79 atoms.
 using MORK, Test
 
-@testset "logic_query — equational logic produces 79 atoms" begin
+@testset "logic_query — equational logic produces 63 atoms (45 symmetric pairs)" begin
     s = new_space()
     space_add_all_sexpr!(s, """
 (exec 0 (, (axiom (= \$lhs \$rhs)) (axiom (= \$rhs \$lhs))) (, (reversed \$lhs \$rhs)))
@@ -34,9 +34,10 @@ using MORK, Test
     end
     steps = space_metta_calculus!(s, 100_000)
     @test steps < 100_000
-    # NOTE: upstream asserts 79; our ProductZipper finds 45 reversed pairs (63 total)
-    # vs upstream's 61 (79 total). The gap is a known ProductZipper enumeration issue
-    # — some valid (axiom_A, axiom_B) pairs are not enumerated by the 2-factor join.
-    # TODO: investigate ProductZipper path enumeration completeness.
-    @test space_val_count(s) >= 60
+    # Upstream kernel/src/main.rs has assert_eq!(btm.val_count(), 79) in logic_query()
+    # but that function is commented out as "// possibly faulty test" because the 79
+    # figure predates the cycle-check addition (commit ccf72ec on unification_test_laws).
+    # After occurs-check, Rust+Prolog agree on 45 symmetric pairs → 63 atoms total.
+    # 18 of the 324 pairs (18²) are genuine same-namespace cycles caught by occurs check.
+    @test space_val_count(s) == 63
 end
