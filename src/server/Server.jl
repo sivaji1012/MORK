@@ -68,15 +68,26 @@ function _handle_request(server::MorkServer, req::HTTP.Request) :: HTTP.Response
     body         = Vector{UInt8}(req.body)
     query_params = _parse_query(uri)
 
-    # Root path — return API index
-    if isempty(cmd_name) || cmd_name == "favicon.ico"
+    # Favicon — return minimal transparent ICO so browsers stop retrying with 404s
+    if cmd_name == "favicon.ico"
+        ico = UInt8[0x00,0x00,0x01,0x00,0x01,0x00,0x01,0x01,0x00,0x00,0x01,0x00,
+                    0x18,0x00,0x0A,0x00,0x00,0x00,0x16,0x00,0x00,0x00]
+        return HTTP.Response(200, ["Content-Type" => "image/x-icon"], ico)
+    end
+
+    # Root path — return API index with clickable links
+    if isempty(cmd_name)
+        host_display = server.addr == "0.0.0.0" ? "localhost" : server.addr
+        base_url = "http://$(host_display):$(server.port)"
         commands = sort(collect(keys(COMMAND_TABLE)))
+        cmd_links = join(["<li><a href=\"/$c\"><code>/$c</code></a></li>" for c in commands])
         html = """<!DOCTYPE html><html><head><title>MORK Server</title></head><body>
 <h2>MORK Server v$(MORK.version())</h2>
 <p>Requests: $(server.request_counter[])  |  Space size: $(space_val_count(server.ss.space)) expressions</p>
-<h3>Commands</h3><ul>""" * join(["<li><code>/$c</code></li>" for c in commands]) * """</ul>
+<h3>Commands</h3><ul>$cmd_links</ul>
 <h3>Quick check</h3>
-<pre>curl http://$(server.addr == "0.0.0.0" ? "localhost" : server.addr):$(server.port)/status/-</pre>
+<p><a href="$base_url/status/-">$base_url/status/-</a></p>
+<pre>curl $base_url/status/-</pre>
 </body></html>"""
         return HTTP.Response(200, ["Content-Type" => "text/html"], html)
     end
