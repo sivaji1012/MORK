@@ -570,8 +570,82 @@ end
 # =====================================================================
 function cmd_metta_thread_suspend(ss::ServerSpace, args::Vector{String}, props::Dict{String,String}, body::Vector{UInt8})
     length(args) < 2 && return work_error(400, "metta_thread_suspend: expected exec_location and suspend_location")
-    # Stub — full implementation requires take_map / graft_map on WriteZipper
-    work_error(501, "metta_thread_suspend: not yet fully implemented")
+    exec_loc_str    = args[1]   # thread location to suspend
+    suspend_loc_str = args[2]   # where to store suspended execs
+
+    try
+        # Validate both are ground (no variables)
+        exec_loc_expr    = sexpr_to_expr(exec_loc_str)
+        suspend_loc_expr = sexpr_to_expr(suspend_loc_str)
+
+        # Derive prefixes
+        # exec_prefix    = constant prefix of "(exec (exec_loc $) $ $)"
+        # suspend_prefix = constant prefix of "(suspend_loc $x)"
+        exec_prefix_str    = "(exec ($exec_loc_str \$) \$ \$)"
+        suspend_prefix_str = "($suspend_loc_str \$x)"
+        exec_prefix    = _derive_prefix(sexpr_to_expr(exec_prefix_str))
+        suspend_prefix = _derive_prefix(sexpr_to_expr(suspend_prefix_str))
+
+        # Acquire writer at suspend_prefix; clear any prior suspended state
+        suspend_writer = ss_new_writer(ss, suspend_prefix)
+        suspend_writer === nothing && return work_error(409, "metta_thread_suspend: suspend location is locked")
+
+        try
+            # Clear prior suspended atoms at suspend_prefix
+            old_paths = Vector{UInt8}[]
+            rz0 = read_zipper_at_path(ss.space.btm, suspend_prefix)
+            while zipper_to_next_val!(rz0); push!(old_paths, copy(rz0.prefix_buf)); end
+            for p in old_paths; remove_val_at!(ss.space.btm, p); end
+
+            # Try to acquire writer on exec_prefix (blocks the running thread)
+            exec_writer = ss_new_writer(ss, exec_prefix)
+            if exec_writer === nothing
+                # Couldn't acquire — thread is actively running; retry with spin
+                deadline = time() + 2.0
+                while exec_writer === nothing && time() < deadline
+                    sleep(0.01)
+                    exec_writer = ss_new_writer(ss, exec_prefix)
+                end
+                exec_writer === nothing && return work_error(409, "metta_thread_suspend: exec location is locked (thread still running)")
+            end
+
+            try
+                # Check if thread already stopped (no reader means no active thread)
+                status_loc = _derive_prefix(sexpr_to_expr("(exec $exec_loc_str)"))
+
+                # Collect all exec atoms at exec_prefix and move to suspend_prefix
+                exec_paths = Vector{UInt8}[]
+                rz = read_zipper_at_path(ss.space.btm, exec_prefix)
+                while zipper_to_next_val!(rz)
+                    push!(exec_paths, copy(rz.prefix_buf))
+                end
+
+                if isempty(exec_paths)
+                    return work_error(410, "metta_thread_suspend: thread already exhausted, no exec atoms to suspend")
+                end
+
+                # Rename exec atoms: change thread ID from exec_loc → suspend_loc.
+                # (exec (exec_loc p) pats tpls) → (exec (suspend_loc p) pats tpls)
+                # This lets metta_thread?location=suspend_loc resume them directly.
+                # rel_path = bytes AFTER exec_prefix (priority + patterns + templates bytes)
+                suspend_exec_prefix = _derive_prefix(sexpr_to_expr("(exec ($suspend_loc_str \$) \$ \$)"))
+                for path in exec_paths
+                    remove_val_at!(ss.space.btm, path)
+                    rel_path = path[length(exec_prefix)+1:end]
+                    new_path = vcat(suspend_exec_prefix, rel_path)
+                    set_val_at!(ss.space.btm, new_path, UNIT_VAL)
+                end
+
+                work_ok("Ack. Thread $exec_loc_str cleared, now frozen at `($suspend_loc_str (exec ($exec_loc_str \$priorities) \$patterns \$templates))`")
+            finally
+                ss_release_writer!(ss, exec_writer)
+            end
+        finally
+            ss_release_writer!(ss, suspend_writer)
+        end
+    catch e
+        work_error(400, "metta_thread_suspend: $e")
+    end
 end
 
 # =====================================================================
