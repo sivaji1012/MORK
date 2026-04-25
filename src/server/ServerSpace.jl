@@ -261,6 +261,34 @@ end
 ss_release_reader!(ss::ServerSpace, perm::ReadPermission)  = sm_release_read!(ss.status_map, perm)
 ss_release_writer!(ss::ServerSpace, perm::WritePermission) = sm_release_write!(ss.status_map, perm)
 
+"""
+    ss_new_multiple(ss, f)
+
+Atomically acquire multiple permissions within `f`. While `f` runs no other
+thread can acquire permissions — concurrent `ss_new_reader`/`ss_new_writer`
+calls block on `sm.lock`. Mirrors `Space::new_multiple` in space_temporary.rs.
+"""
+function ss_new_multiple(ss::ServerSpace, f::Function)
+    lock(ss.status_map.lock) do
+        f(ss)
+    end
+end
+
+"""
+    ss_new_writer_retry(ss, path, attempts=5) → Union{WritePermission, Nothing}
+
+Retry writer acquisition up to `attempts` times with 500µs between tries.
+Mirrors `Space::new_writer_retry` in space_temporary.rs.
+"""
+function ss_new_writer_retry(ss::ServerSpace, path::Vector{UInt8}, attempts::Int=5) :: Union{WritePermission, Nothing}
+    for _ in 1:max(1, attempts)
+        p = sm_get_write_permission(ss.status_map, path)
+        p !== nothing && return p
+        sleep(500e-6)
+    end
+    nothing
+end
+
 export ServerSpace, StatusMap, StatusRecord, StatusKind, ReadPermission, WritePermission
 export PATH_CLEAR, PATH_READ_ONLY, PATH_READ_ONLY_TEMPORARY
 export PATH_FORBIDDEN, PATH_FORBIDDEN_TEMPORARY, SERVER_SHUTDOWN
@@ -272,3 +300,5 @@ export sm_get_write_permission, sm_release_write!
 export sm_add_stream!, sm_shutdown!
 export ss_get_status, ss_set_status!, ss_new_reader, ss_new_writer
 export ss_release_reader!, ss_release_writer!
+export ss_new_multiple, ss_new_writer_retry
+export _ss_next_cmd_id!
