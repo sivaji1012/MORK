@@ -68,6 +68,19 @@ function _handle_request(server::MorkServer, req::HTTP.Request) :: HTTP.Response
     body         = Vector{UInt8}(req.body)
     query_params = _parse_query(uri)
 
+    # Root path — return API index
+    if isempty(cmd_name) || cmd_name == "favicon.ico"
+        commands = sort(collect(keys(COMMAND_TABLE)))
+        html = """<!DOCTYPE html><html><head><title>MORK Server</title></head><body>
+<h2>MORK Server v$(MORK.version())</h2>
+<p>Requests: $(server.request_counter[])  |  Space size: $(space_val_count(server.ss.space)) expressions</p>
+<h3>Commands</h3><ul>""" * join(["<li><code>/$c</code></li>" for c in commands]) * """</ul>
+<h3>Quick check</h3>
+<pre>curl http://$(server.addr):$(server.port)/status/-</pre>
+</body></html>"""
+        return HTTP.Response(200, ["Content-Type" => "text/html"], html)
+    end
+
     # Stop command check
     if cmd_name == "stop"
         server.stop_flag[] = true
@@ -76,7 +89,7 @@ function _handle_request(server::MorkServer, req::HTTP.Request) :: HTTP.Response
 
     entry = get(COMMAND_TABLE, cmd_name, nothing)
     if entry === nothing
-        return HTTP.Response(404, "Unknown command: $cmd_name")
+        return HTTP.Response(404, "Unknown command: $cmd_name\nAvailable: " * join(sort(collect(keys(COMMAND_TABLE))), ", "))
     end
 
     _http_method, handler_fn = entry
