@@ -82,13 +82,26 @@ function _handle_request(server::MorkServer, req::HTTP.Request) :: HTTP.Response
         base_url  = "http://$(host_hdr)"
         commands  = sort(collect(keys(COMMAND_TABLE)))
         cmd_links = join(["<li><a href=\"/$c\"><code>/$c</code></a></li>" for c in commands])
-        html = """<!DOCTYPE html><html><head><title>MORK Server</title></head><body>
-<h2>MORK Server v$(MORK.version())</h2>
-<p>Requests: $(server.request_counter[])  |  Space size: $(space_val_count(server.ss.space)) expressions</p>
+        html = """<!DOCTYPE html>
+<html><head><title>MORK Server</title>
+<style>
+  body{font-family:monospace;max-width:600px;margin:2em auto;padding:0 1em}
+  ul{list-style:none;padding:0}
+  li{margin:4px 0}
+  li a{display:inline-block;padding:2px 8px;background:#f0f0f0;border-radius:3px;
+       text-decoration:none;color:#0057b8;border:1px solid #ccc}
+  li a:hover{background:#dde8ff;border-color:#0057b8}
+  .qc{background:#f8f8f8;border:1px solid #ddd;padding:8px 12px;border-radius:4px}
+  .qc a{color:#0057b8}
+  pre{margin:6px 0;font-size:0.95em}
+</style>
+</head><body>
+<h2>MORK Server <small>v$(MORK.version())</small></h2>
+<p>Requests: <b>$(server.request_counter[])</b> &nbsp;|&nbsp; Space: <b>$(space_val_count(server.ss.space))</b> atoms</p>
 <h3>Commands</h3><ul>$cmd_links</ul>
 <h3>Quick check</h3>
-<p><a href="$base_url/status/-">$base_url/status/-</a></p>
-<pre>curl $base_url/status/-</pre>
+<div class="qc"><a href="$base_url/status/-">$base_url/status/-</a>
+<pre>curl $base_url/status/-</pre></div>
 </body></html>"""
         return HTTP.Response(200, ["Content-Type" => "text/html"], html)
     end
