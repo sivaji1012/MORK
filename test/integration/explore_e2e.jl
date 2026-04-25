@@ -22,14 +22,13 @@ sleep(0.3)
     status, _ = _exp_post("/upload/\$/\$", "(node a)\n(node b)\n(node c)\n(other x)\n")
     @test status == 200
 
-    # Explore under (node $x) prefix
+    # Initial explore under (node $x) prefix — returns initial tokens
     status, body = _exp_get("/explore/(node%20%24x)")
     @test status == 200
     items = JSON3.read(body)
     @test items isa AbstractVector
     @test length(items) >= 1
 
-    # Each item has token, cnt, expr
     for item in items
         @test haskey(item, :token)
         @test haskey(item, :cnt)
@@ -37,22 +36,33 @@ sleep(0.3)
         @test item.cnt >= 1
     end
 
-    # Expressions should contain "node" functor
     @test any(item -> occursin("node", item.expr), items)
 
-    # Explore (other $x) → its atoms
-    status2, body2 = _exp_get("/explore/(other%20%24x)")
-    @test status2 == 200
-    items2 = JSON3.read(body2)
-    @test any(item -> occursin("other", item.expr), items2)
+    # Iterative explore: pass token from first result to get deeper results
+    if !isempty(items)
+        tok_ints = collect(items[1].token)
+        if !isempty(tok_ints)
+            tok_encoded = join(["%$(uppercase(string(UInt8(b), base=16, pad=2)))" for b in tok_ints])
+            status2, body2 = _exp_get("/explore/(node%20%24x)/$tok_encoded")
+            @test status2 == 200
+            items2 = JSON3.read(body2)
+            @test items2 isa AbstractVector
+            # Iterative results are the individual (node a/b/c) atoms
+            @test length(items2) >= 1
+            @test all(item -> occursin("node", item.expr), items2)
+        end
+    end
 
-    # Non-existent prefix → empty array, no error
+    # Non-existent prefix → empty array
     status3, body3 = _exp_get("/explore/(nosuch_xyz)")
     @test status3 == 200
     @test JSON3.read(body3) == []
 
-    # Note: iterative explore (passing token back) deferred — server-side
-    # BoundsError with partial trie-key tokens is a known gap.
+    # (other $x) prefix
+    status4, body4 = _exp_get("/explore/(other%20%24x)")
+    @test status4 == 200
+    items4 = JSON3.read(body4)
+    @test any(item -> occursin("other", item.expr), items4)
 
 end
 
