@@ -1,0 +1,164 @@
+# MORK / PathMap Quality Report
+**Date:** 2026-04-26  
+**MORK:** `e9b865f` · **PathMap:** `aca7cb6`  
+**Julia:** 1.12.6 · **Platform:** Linux x86_64
+
+---
+
+## 1. CI Status
+
+| Platform | PathMap | MORK |
+|----------|---------|------|
+| ubuntu-latest | ✅ pass | ✅ pass |
+| windows-latest | ✅ pass | ✅ pass |
+| macos-latest | ✅ pass | ✅ pass |
+
+**Test suite:** 1566 / 1566 pass (MORK) · 33 / 33 pass (PathMap)
+
+---
+
+## 2. Static Analysis — JET.jl
+
+`report_package("MORK")` and `@report_call space_metta_calculus!` were run.
+
+### Bugs found and fixed
+
+| File | Error | Fix applied |
+|------|-------|-------------|
+| `expr/ExprAlg.jl:275–283` | `tag2` union not narrowed after `isa` check → `ExprSymbol has no field arity` / `ExprVarRef has no field arity` | Added `tag2::ExprSymbol` / `tag2::ExprArity` assertions in `isa` branches |
+| `kernel/Space.jl:612,629,633` | `persistent_sinks::Union{Nothing,Vector}` iterated and indexed without nil guard | Added `persistent_sinks !== nothing` guard + `ps = persistent_sinks::Vector` local alias |
+| `kernel/Sinks.jl:222` | `wz_join_into!` called with `root::Union{Nothing,TrieNodeODRc}` — no `Nothing` overload | Added `root === nothing && return false` early exit in `sink_finalize!` |
+| `pathmap/ArenaCompact.jl:142–146` | `off` and `v` shadowed outer-scope names inside `ntuple` closure → reported as undefined | Renamed to `word_off` / `w` to eliminate shadowing |
+| `pathmap/ArenaCompact.jl:552–556` | `act_reset!` destructured `(node, size_int)` from `act_get_node` and passed `size_int` as `ACT_NodeId` to `_ACTFrame` | Fixed to preserve `z.stack[1].node_id` (the actual `ACT_NodeId`) |
+
+> **Note:** The `act_reset!` bug was a genuine correctness defect — passing a node byte-size as a node ID would produce a garbage `_ACTFrame` on every reset, making `ACTZipper` iterator state invalid after any reset call.
+
+### Remaining JET warnings
+
+The remaining ~75 `report_package` warnings are constructor-shape false positives (structs with `Any`-typed fields from abstract-typed generic parameters). None affect runtime correctness. `@report_call space_metta_calculus!` returns **0 errors** after the fixes.
+
+---
+
+## 3. Type Stability — `@code_warntype`
+
+| Function | `::Any` hits | `::Union` splits | Verdict |
+|----------|-------------|-----------------|---------|
+| `space_metta_calculus!` | 0 | 0 | ✅ fully stable |
+| `set_val_at!` (PathMap) | 0 | 0 | ✅ fully stable |
+| `get_val_at` (PathMap) | 0 | 0 | ✅ fully stable |
+| `space_transform_multi_multi!` | 0 | 0 | ✅ fully stable |
+
+All hot paths are fully type-stable. Julia's JIT compiles them to native code with no dynamic dispatch.
+
+---
+
+## 4. Lint — `tools/lint.sh`
+
+| Check | Result |
+|-------|--------|
+| `oz.loc +=` double-advances outside `Expr.jl` | ✅ PASS |
+| `ez.loc` advances in `ExprNewVar` / `ExprVarRef` branches | ✅ PASS |
+| `sub_ez` uses `expr_span` (bounded sub-expression) | ✅ PASS |
+| Integration tests have step-cap assertions | ✅ PASS |
+| Integration test step caps ≤ 100 k | ✅ PASS |
+
+---
+
+## 5. Benchmarks — `BenchmarkTools.jl`
+
+Benchmark suite lives in `benchmark/` (self-contained Julia environment).  
+Run with: `julia --project=benchmark benchmark/benchmarks.jl`
+
+### Results (median, Linux x86_64, warm JIT)
+
+#### Space calculus
+
+| Benchmark | Median | Allocs | Memory |
+|-----------|--------|--------|--------|
+| `chain_100_steps` | **182 μs** | 926 | 37 KiB |
+| `float_sinks_fsum_50` | **1.49 ms** | 7,970 | 399 KiB |
+| `ground_match_200` | **4.46 ms** | 28,147 | 1.32 MiB |
+| `two_source_10x10` | **7.61 ms** | 45,045 | 2.16 MiB |
+| `build_200_atoms` (setup cost) | **12.16 ms** | 18,415 | 1.14 MiB |
+
+#### PathMap core ops
+
+| Benchmark | Median | Allocs | Memory |
+|-----------|--------|--------|--------|
+| `pjoin_500` | **868 μs** | 6,370 | 323 KiB |
+| `serialize_100` | **374 μs** | 2,787 | 110 KiB |
+| `deserialize_100` | **342 μs** | 3,835 | 129 KiB |
+| `psubtract_500` | **3.80 ms** | 29,092 | 1.59 MiB |
+| `insert_1k` | **5.90 ms** | 54,758 | 1.77 MiB |
+| `lookup_1k` | **5.38 ms** | 43,187 | 1.51 MiB |
+
+#### Expression unification
+
+| Benchmark | Median | Allocs | Memory |
+|-----------|--------|--------|--------|
+| `unify_flat_pair` | **450 μs** | 1,001 | 41 KiB |
+| `unify_nested_tree` | **581 μs** | 1,435 | 58 KiB |
+
+---
+
+## 6. Profiler — `Profile.jl`
+
+### `insert_1k` — dominant cost areas
+
+The flat profile shows time concentrated in:
+
+1. **String allocation** — `print_to_string` / `ndigits` / `append_c_digits` (building `"key:N"` strings on every insert). These allocations account for the bulk of the 54 k allocs per 1 k inserts.
+2. **Array growth** — `_growend!` / `_growat!` / `memmove` in `DenseByteNode` child list insertion (the trie node grows a `CoFreeEntry` vector on each new byte-branch).
+3. **COW clone** — `_wz_ensure_write_unique!` (lazy copy-on-write descent) contributes a small fraction.
+
+**Root cause:** `Vector{UInt8}(string("key:", i))` allocates two objects per insert (String + Vector). A pre-allocated byte key avoids both.
+
+### `two_source_10x10` — dominant cost areas
+
+Time spread across:
+
+1. **`ProductZipper` traversal** — `pz_to_next_sibling_byte!`, `pz_ascend_byte!`, `pz_to_next_val!` — iterating the Cartesian product of two source tries.
+2. **`zipper_descend_first_byte!`** — called repeatedly during product enumeration.
+3. **`deepcopy`** in `space_transform_multi_multi!` — per-match deep copy of bindings before applying the template.
+4. **`__cat_offset!`** — array concatenation inside expression serialisation.
+
+**Root cause:** The 10×10 = 100-pair join is correct but allocates a fresh bindings `Dict` and result `Vector{UInt8}` for every match. The `deepcopy` at Space.jl:578 is the largest single contributor.
+
+---
+
+## 7. Optimisation Opportunities (prioritised)
+
+| Priority | Location | Issue | Potential fix |
+|----------|----------|-------|---------------|
+| 🔴 High | `Space.jl:578` | `deepcopy(bindings)` per match in `two_source` path | Pass bindings as read-only view; undo mutations after template application (backtracking dict) |
+| 🔴 High | `insert_1k` callers | `Vector{UInt8}(string(...))` allocates 2 objects per key | Accept `AbstractString` key with `codeunits` view, or pre-encode keys as `b"..."` literals |
+| 🟡 Med | `DenseByteNode` | `CoFreeEntry` child-list grows via `insert!` (O(n) memmove) | Pre-allocate child list to 4–8 slots on first branch |
+| 🟡 Med | `space_transform_multi_multi!` | Result `Vector{UInt8}` allocated per match | Thread-local output buffer, reset between matches |
+| 🟢 Low | `ProductZipper` | Allocation in `pz_ascend_byte!` sibling tracking | Stack-allocated frame (StaticArrays) for zipper path |
+
+---
+
+## 8. Platform Compatibility
+
+| Issue | Status |
+|-------|--------|
+| `ZStream` struct layout (LP64 vs LLP64) | ✅ Fixed — platform-conditional struct in `PathsSerialization.jl` |
+| Windows `uLong` = 32-bit | ✅ Fixed — Windows branch uses `UInt32` for `total_in/out/adler/reserved` |
+| `Zlib_jll` version string `"1.2.11"` with zlib 1.3.x | ✅ Safe — zlib checks major version only (`'1' == '1'`) |
+
+---
+
+## 9. Summary
+
+| Category | Status |
+|----------|--------|
+| CI (3 platforms × 2 packages) | ✅ 6/6 green |
+| Test suite | ✅ 1566/1566 + 33/33 |
+| JET static analysis | ✅ 5 bugs fixed, 0 remaining in hot paths |
+| Type stability (hot paths) | ✅ 0 `::Any`, 0 union splits |
+| Lint (5 structural checks) | ✅ 5/5 pass |
+| Benchmark suite | ✅ 13 benchmarks, baseline recorded |
+| Profile analysis | ✅ Two bottlenecks identified and documented |
+| Windows serialization | ✅ Fixed (`ZStream` layout) |
+
+**The packages are production-quality for a v0.x release.** The two highest-priority optimisations (bindings deepcopy, key-string allocation) are independent of the public API and can be addressed in a follow-up without breaking any existing callers.
