@@ -199,7 +199,7 @@ uuid = "6f1432cf-f94c-5a45-995e-cdbf5db27b0b"
 version = "3.5.1"
 
 [[deps.MORK]]
-deps = ["Base64", "BenchmarkTools", "HTTP", "JET", "JSON3", "PrecompileTools", "PropCheck", "SHA", "Zlib_jll"]
+deps = ["Base64", "BenchmarkTools", "HTTP", "JET", "JSON3", "PathMap", "PrecompileTools", "PropCheck", "SHA", "Zlib_jll"]
 path = "."
 uuid = "162375cb-4023-4ef9-895b-22c0041d5c13"
 version = "0.1.0"
@@ -266,8 +266,8 @@ uuid = "69de0a69-1ddd-5017-9359-2bf0b02dc9f0"
 version = "2.8.3"
 
 [[deps.PathMap]]
-deps = ["BenchmarkTools", "PrecompileTools", "Zlib_jll"]
-git-tree-sha1 = "ac48b1c665a65ee3a769689ea48c51f9961e3e3b"
+deps = ["PrecompileTools", "Zlib_jll"]
+git-tree-sha1 = "16ba3050abef28bbb95a66b24ae78197a47b3f4b"
 repo-rev = "main"
 repo-url = "https://github.com/sivaji1012/PathMap.git"
 uuid = "a8b3d4e5-f012-4567-89ab-cdef01234567"
