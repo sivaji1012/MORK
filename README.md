@@ -261,10 +261,19 @@ tools/
 
 | Document | Description |
 |----------|-------------|
-| [Space & Rules Guide](docs/guide/space_rules.md) | Writing rules, patterns, outputs |
-| [Sinks Reference](docs/guide/sinks.md) | All sink operators with examples |
-| [Server Guide](docs/guide/server.md) | HTTP API reference |
-| [Expression Encoding](docs/guide/expressions.md) | Byte-tag expression format |
+**Guides**
+
+| Document | Description |
+|----------|-------------|
+| [Space & Rules](docs/guide/space_rules.md) | Writing rules, patterns, multi-pattern match |
+| [Sinks](docs/guide/sinks.md) | All sink operators with worked examples |
+| [HTTP Server](docs/guide/server.md) | All endpoints, client API, resource store |
+| [Expression Encoding](docs/guide/expressions.md) | Byte-tag format, parsers, content addressing |
+
+**Reference**
+
+| Document | Description |
+|----------|-------------|
 | [API Reference](docs/api/README.md) | Full exported symbol index |
 
 ---
