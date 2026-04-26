@@ -1,5 +1,8 @@
 using Test
 using MORK
+using PathMap
+# PathMap module and PathMap type share the same name — alias the type
+const PM = PathMap.PathMap
 
 @testset "MORK" begin
     @testset "Phase 0 skeleton" begin
@@ -1127,7 +1130,7 @@ using MORK
             r = pjoin_dyn(a, b)
             @test r isa AlgResElement
             # Wire into a PathMap so we can use get_val_at for full-path traversal
-            m = PathMap{Int}()
+            m = PM{Int}()
             m.root = r.value
             @test get_val_at(m, collect(UInt8, "abc")) == 1
             @test get_val_at(m, collect(UInt8, "abd")) == 2
@@ -1176,7 +1179,7 @@ using MORK
             tiny = TinyRefNode(false, collect(UInt8, "xyz"), ValOrChild(2), GlobalAlloc())
             r = pjoin_dyn(lln, tiny)
             @test r isa AlgResElement
-            m = PathMap{Int}(); m.root = r.value
+            m = PM{Int}(); m.root = r.value
             @test get_val_at(m, collect(UInt8, "abc")) == 1
             @test get_val_at(m, collect(UInt8, "xyz")) == 2
         end
@@ -1308,20 +1311,20 @@ using MORK
             n = LineListNode{Int, GlobalAlloc}(GlobalAlloc())
             node_set_val!(n, UInt8[0x61], 5)
             # pmeet of node with itself (same content) via PathMap
-            m1 = PathMap{Int}(); set_val_at!(m1, "a", 5)
-            m2 = PathMap{Int}(); set_val_at!(m2, "a", 5)
+            m1 = PM{Int}(); set_val_at!(m1, "a", 5)
+            m2 = PM{Int}(); set_val_at!(m2, "a", 5)
             r = pmeet(m1.root, m2.root)
             @test r isa AlgResIdentity || (r isa AlgResElement && get_val_at(m1, "a") == 5)
         end
 
         @testset "LineListNode — pmeet_dyn intersection: common key wins" begin
             # a has "a"→3, "b"→7 ; b has "a"→5, "c"→9 ; meet = "a"→min(3,5)=3
-            m1 = PathMap{Int}(); set_val_at!(m1, "a", 3); set_val_at!(m1, "b", 7)
-            m2 = PathMap{Int}(); set_val_at!(m2, "a", 5); set_val_at!(m2, "c", 9)
+            m1 = PM{Int}(); set_val_at!(m1, "a", 3); set_val_at!(m1, "b", 7)
+            m2 = PM{Int}(); set_val_at!(m2, "a", 5); set_val_at!(m2, "c", 9)
             r = pmeet(m1.root, m2.root)
             # result contains only key "a" with value min(3,5)=3
             @test r isa AlgResElement || r isa AlgResIdentity
-            result_m = PathMap{Int}()
+            result_m = PM{Int}()
             if r isa AlgResElement
                 result_m.root = r.value
             elseif r isa AlgResIdentity
@@ -1333,8 +1336,8 @@ using MORK
         end
 
         @testset "LineListNode — pmeet_dyn disjoint keys → None" begin
-            m1 = PathMap{Int}(); set_val_at!(m1, "a", 1)
-            m2 = PathMap{Int}(); set_val_at!(m2, "b", 2)
+            m1 = PM{Int}(); set_val_at!(m1, "a", 1)
+            m2 = PM{Int}(); set_val_at!(m2, "b", 2)
             r = pmeet(m1.root, m2.root)
             @test r isa AlgResNone
         end
@@ -1760,7 +1763,7 @@ using MORK
         alloc = GlobalAlloc()
 
         @testset "Dense × Empty → None" begin
-            m = PathMap{Int,GlobalAlloc}(alloc)
+            m = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(m, UInt8[0x61], 1)
             set_val_at!(m, UInt8[0x62], 2)
             set_val_at!(m, UInt8[0x63], 3)
@@ -1771,7 +1774,7 @@ using MORK
         end
 
         @testset "Dense × Dense same node → Identity(SELF|COUNTER)" begin
-            m = PathMap{Int,GlobalAlloc}(alloc)
+            m = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(m, UInt8[0x61], 1)
             set_val_at!(m, UInt8[0x62], 2)
             set_val_at!(m, UInt8[0x63], 3)
@@ -1781,11 +1784,11 @@ using MORK
         end
 
         @testset "Dense × Dense overlap → common keys only" begin
-            m1 = PathMap{Int,GlobalAlloc}(alloc)
+            m1 = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(m1, UInt8[0x61], 10)
             set_val_at!(m1, UInt8[0x62], 20)
             set_val_at!(m1, UInt8[0x63], 30)
-            m2 = PathMap{Int,GlobalAlloc}(alloc)
+            m2 = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(m2, UInt8[0x62], 200)
             set_val_at!(m2, UInt8[0x63], 300)
             set_val_at!(m2, UInt8[0x64], 400)
@@ -1795,11 +1798,11 @@ using MORK
         end
 
         @testset "Dense × Dense disjoint → None" begin
-            m1 = PathMap{Int,GlobalAlloc}(alloc)
+            m1 = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(m1, UInt8[0x61], 1)
             set_val_at!(m1, UInt8[0x62], 2)
             set_val_at!(m1, UInt8[0x63], 3)
-            m2 = PathMap{Int,GlobalAlloc}(alloc)
+            m2 = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(m2, UInt8[0x64], 4)
             set_val_at!(m2, UInt8[0x65], 5)
             set_val_at!(m2, UInt8[0x66], 6)
@@ -1808,7 +1811,7 @@ using MORK
         end
 
         @testset "Dense × LineListNode (cross-type, delegates via invert)" begin
-            m = PathMap{Int,GlobalAlloc}(alloc)
+            m = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(m, UInt8[0x61], 10)
             set_val_at!(m, UInt8[0x62], 20)
             set_val_at!(m, UInt8[0x63], 30)
@@ -2016,20 +2019,20 @@ using MORK
         # ---- PathMap ----
 
         @testset "PathMap — empty map is_empty" begin
-            m = PathMap{V}()
+            m = PM{V}()
             @test Base.isempty(m)
             @test val_count(m) == 0
         end
 
         @testset "PathMap — read_zipper on empty map" begin
-            m = PathMap{V}()
+            m = PM{V}()
             z = read_zipper(m)
             @test zipper_at_root(z)
             @test !zipper_is_val(z)
         end
 
         @testset "PathMap — get_val_at missing key returns nothing" begin
-            m = PathMap{V}()
+            m = PM{V}()
             @test get_val_at(m, collect(UInt8, "missing")) === nothing
         end
 
@@ -2038,7 +2041,7 @@ using MORK
             root_n = LineListNode{V,A}(alloc)
             node_set_val!(root_n, collect(UInt8, "hello"), 42)
             root_rc = TrieNodeODRc(root_n, alloc)
-            m = PathMap{V,A}(root_rc, nothing, alloc)
+            m = PM{V,A}(root_rc, nothing, alloc)
 
             @test get_val_at(m, collect(UInt8, "hello")) == 42
             @test get_val_at(m, collect(UInt8, "world")) === nothing
@@ -2050,7 +2053,7 @@ using MORK
             root_n = LineListNode{V,A}(alloc)
             node_set_val!(root_n, collect(UInt8, "key"), 77)
             root_rc = TrieNodeODRc(root_n, alloc)
-            m = PathMap{V,A}(root_rc, nothing, alloc)
+            m = PM{V,A}(root_rc, nothing, alloc)
 
             z = read_zipper_at_path(m, collect(UInt8, "key"))
             @test zipper_is_val(z)
@@ -2062,7 +2065,7 @@ using MORK
             root_n = LineListNode{V,A}(alloc)
             node_set_val!(root_n, collect(UInt8, "yes"), 1)
             root_rc = TrieNodeODRc(root_n, alloc)
-            m = PathMap{V,A}(root_rc, nothing, alloc)
+            m = PM{V,A}(root_rc, nothing, alloc)
 
             @test path_exists_at(m, collect(UInt8, "yes"))
             @test !path_exists_at(m, collect(UInt8, "no"))
@@ -2071,7 +2074,7 @@ using MORK
         # ---- ZipperMoving new defaults ----
 
         @testset "zipper_to_next_sibling_byte!" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8,"a"), 1)
             set_val_at!(m, collect(UInt8,"b"), 2)
             set_val_at!(m, collect(UInt8,"c"), 3)
@@ -2086,7 +2089,7 @@ using MORK
         end
 
         @testset "zipper_descend_last_byte! / zipper_descend_last_path!" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8,"a"), 1)
             set_val_at!(m, collect(UInt8,"b"), 2)
             z = read_zipper(m)
@@ -2095,7 +2098,7 @@ using MORK
         end
 
         @testset "zipper_to_next_val! iterates all values in DFS order" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8,"a"),  1)
             set_val_at!(m, collect(UInt8,"ba"), 2)
             set_val_at!(m, collect(UInt8,"bb"), 3)
@@ -2109,7 +2112,7 @@ using MORK
         end
 
         @testset "zipper_descend_to_val! stops at first val along path" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8,"ab"), 10)
             set_val_at!(m, collect(UInt8,"abc"), 20)
             z = read_zipper(m)
@@ -2119,7 +2122,7 @@ using MORK
         end
 
         @testset "zipper_move_to_path! navigates to absolute path" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8,"foo"), 1)
             set_val_at!(m, collect(UInt8,"bar"), 2)
             z = read_zipper(m)
@@ -2131,7 +2134,7 @@ using MORK
         end
 
         @testset "zipper_fork! creates sub-zipper at focus" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8,"ab"), 1)
             set_val_at!(m, collect(UInt8,"ac"), 2)
             z = read_zipper(m)
@@ -2142,7 +2145,7 @@ using MORK
         end
 
         @testset "zipper_to_next_step! does DFS one step at a time" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8,"a"), 1)
             set_val_at!(m, collect(UInt8,"b"), 2)
             z = read_zipper(m)
@@ -2152,7 +2155,7 @@ using MORK
         end
 
         @testset "rz_ aliases work" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8,"x"), 99)
             z = read_zipper(m)
             @test !rz_is_val(z)
@@ -2169,9 +2172,9 @@ using MORK
         alloc = GlobalAlloc()
 
         @testset "pjoin: disjoint → Element with all keys" begin
-            a = PathMap{Int,GlobalAlloc}(alloc)
+            a = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(a, UInt8[0x61], 1)
-            b = PathMap{Int,GlobalAlloc}(alloc)
+            b = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(b, UInt8[0x62], 2)
             r = pjoin(a, b)
             @test r isa AlgResElement
@@ -2180,7 +2183,7 @@ using MORK
         end
 
         @testset "pjoin: same map → Identity(SELF|COUNTER)" begin
-            a = PathMap{Int,GlobalAlloc}(alloc)
+            a = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(a, UInt8[0x61], 1)
             r = pjoin(a, a)
             @test r isa AlgResIdentity
@@ -2191,9 +2194,9 @@ using MORK
             # pmeet(a, b) where nodes are disjoint and both root_vals are nothing:
             # node_res=None, val_res=Identity(SELF|COUNTER) → merge_f(nothing,nothing)
             # → AlgResElement(empty PathMap). Upstream trie_map.rs:725 + ring.rs:216.
-            a = PathMap{Int,GlobalAlloc}(alloc)
+            a = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(a, UInt8[0x61], 1)
-            b = PathMap{Int,GlobalAlloc}(alloc)
+            b = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(b, UInt8[0x62], 2)
             r = pmeet(a, b)
             @test r isa AlgResElement
@@ -2201,7 +2204,7 @@ using MORK
         end
 
         @testset "pmeet: same map → Identity(SELF|COUNTER)" begin
-            a = PathMap{Int,GlobalAlloc}(alloc)
+            a = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(a, UInt8[0x61], 1)
             r = pmeet(a, a)
             @test r isa AlgResIdentity
@@ -2209,10 +2212,10 @@ using MORK
         end
 
         @testset "pmeet: overlapping keys → common key survives" begin
-            a = PathMap{Int,GlobalAlloc}(alloc)
+            a = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(a, UInt8[0x61], 1)
             set_val_at!(a, UInt8[0x62], 2)
-            b = PathMap{Int,GlobalAlloc}(alloc)
+            b = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(b, UInt8[0x62], 2)
             set_val_at!(b, UInt8[0x63], 3)
             r = pmeet(a, b)
@@ -2220,34 +2223,34 @@ using MORK
         end
 
         @testset "psubtract: a - empty → Identity(SELF)" begin
-            a = PathMap{Int,GlobalAlloc}(alloc)
+            a = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(a, UInt8[0x61], 1)
-            b = PathMap{Int,GlobalAlloc}(alloc)
+            b = PM{Int,GlobalAlloc}(alloc)
             r = psubtract(a, b)
             @test r isa AlgResIdentity
             @test (r.mask & SELF_IDENT) != 0
         end
 
         @testset "psubtract: a - a → None" begin
-            a = PathMap{Int,GlobalAlloc}(alloc)
+            a = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(a, UInt8[0x61], 1)
             r = psubtract(a, a)
             @test r isa AlgResNone
         end
 
         @testset "prestrict: other has root_val → Identity(SELF)" begin
-            a = PathMap{Int,GlobalAlloc}(alloc)
+            a = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(a, UInt8[0x61], 1)
-            b = PathMap{Int,GlobalAlloc}(nothing, 99, alloc)
+            b = PM{Int,GlobalAlloc}(nothing, 99, alloc)
             r = prestrict(a, b)
             @test r isa AlgResIdentity
             @test (r.mask & SELF_IDENT) != 0
         end
 
         @testset "prestrict: b empty → None" begin
-            a = PathMap{Int,GlobalAlloc}(alloc)
+            a = PM{Int,GlobalAlloc}(alloc)
             set_val_at!(a, UInt8[0x61], 1)
-            b = PathMap{Int,GlobalAlloc}(alloc)
+            b = PM{Int,GlobalAlloc}(alloc)
             r = prestrict(a, b)
             @test r isa AlgResNone
         end
@@ -2260,7 +2263,7 @@ using MORK
         # write_zipper construction
         # ------------------------------------------------------------------
         @testset "write_zipper — construction at root" begin
-            m = PathMap{V}()
+            m = PM{V}()
             z = write_zipper(m)
             @test z isa WriteZipperCore{V,GlobalAlloc}
             @test length(z.focus_stack) == 1
@@ -2273,7 +2276,7 @@ using MORK
         # set root val (at_root path of wz_set_val!)
         # ------------------------------------------------------------------
         @testset "wz_set_val! at root → root_val" begin
-            m = PathMap{V}()
+            m = PM{V}()
             z = write_zipper(m)
             old = wz_set_val!(z, 42)
             @test old === nothing
@@ -2290,7 +2293,7 @@ using MORK
         # set_val_at! and get_val_at roundtrip
         # ------------------------------------------------------------------
         @testset "set_val_at! / get_val_at roundtrip" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "hello"), 1)
             @test get_val_at(m, collect(UInt8, "hello")) == 1
 
@@ -2308,7 +2311,7 @@ using MORK
         # val_count after writes
         # ------------------------------------------------------------------
         @testset "val_count after multiple set_val_at!" begin
-            m = PathMap{V}()
+            m = PM{V}()
             @test val_count(m) == 0
 
             set_val_at!(m, collect(UInt8, "a"), 10)
@@ -2325,7 +2328,7 @@ using MORK
         # Overwrite (set returns old value)
         # ------------------------------------------------------------------
         @testset "set_val_at! overwrite returns old value" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "key"), 111)
             old = set_val_at!(m, collect(UInt8, "key"), 222)
             @test old == 111
@@ -2337,7 +2340,7 @@ using MORK
         # Node upgrade path: > 2 distinct entries forces LineListNode → DenseByteNode
         # ------------------------------------------------------------------
         @testset "node upgrade (LineListNode → DenseByteNode) via set_val_at!" begin
-            m = PathMap{V}()
+            m = PM{V}()
             # LineListNode has 2 slots; a third unique entry triggers upgrade
             set_val_at!(m, UInt8[1], 100)
             set_val_at!(m, UInt8[2], 200)
@@ -2352,7 +2355,7 @@ using MORK
         # remove_val_at!
         # ------------------------------------------------------------------
         @testset "remove_val_at!" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "foo"), 7)
             set_val_at!(m, collect(UInt8, "bar"), 8)
             @test val_count(m) == 2
@@ -2368,7 +2371,7 @@ using MORK
         # remove_val_at! on missing path returns nothing
         # ------------------------------------------------------------------
         @testset "remove_val_at! missing path" begin
-            m = PathMap{V}()
+            m = PM{V}()
             @test remove_val_at!(m, collect(UInt8, "nope")) === nothing
         end
 
@@ -2376,7 +2379,7 @@ using MORK
         # wz_path_exists / wz_is_val / wz_get_val
         # ------------------------------------------------------------------
         @testset "wz_path_exists / wz_is_val / wz_get_val" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "abc"), 55)
 
             z = write_zipper(m)
@@ -2396,7 +2399,7 @@ using MORK
         # write_zipper_at_path
         # ------------------------------------------------------------------
         @testset "write_zipper_at_path" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "prefix:data"), 99)
 
             # create zipper pre-positioned at "prefix:" then set a second value
@@ -2411,7 +2414,7 @@ using MORK
         # PathMap.isempty changes after write/remove
         # ------------------------------------------------------------------
         @testset "PathMap isempty semantics with writes" begin
-            m = PathMap{V}()
+            m = PM{V}()
             @test isempty(m)
 
             set_val_at!(m, collect(UInt8, "x"), 1)
@@ -2429,12 +2432,12 @@ using MORK
         # ==================================================================
 
         @testset "wz_graft! — replace subtrie unconditionally" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "abc"), 1)
             set_val_at!(m, collect(UInt8, "abd"), 2)
 
             # src: a map with only "abc" → 99
-            src = PathMap{V}()
+            src = PM{V}()
             set_val_at!(src, collect(UInt8, "abc"), 99)
 
             # graft src at root of m → m becomes src
@@ -2447,10 +2450,10 @@ using MORK
         end
 
         @testset "wz_graft_map! — graft from PathMap" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "x"), 5)
 
-            src = PathMap{V}()
+            src = PM{V}()
             set_val_at!(src, collect(UInt8, "x"), 42)
 
             z = write_zipper(m)
@@ -2459,9 +2462,9 @@ using MORK
         end
 
         @testset "wz_join_into! — disjoint maps produce union" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "a"), 1)
-            src = PathMap{V}()
+            src = PM{V}()
             set_val_at!(src, collect(UInt8, "b"), 2)
 
             z    = write_zipper(m)
@@ -2475,7 +2478,7 @@ using MORK
         end
 
         @testset "wz_join_into! — empty src returns Identity" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "a"), 7)
 
             z   = write_zipper(m)
@@ -2486,10 +2489,10 @@ using MORK
         end
 
         @testset "wz_join_map_into! — identical maps → Identity" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "k"), 3)
             # Join with a copy
-            src = PathMap{V}()
+            src = PM{V}()
             set_val_at!(src, collect(UInt8, "k"), 3)
 
             z  = write_zipper(m)
@@ -2500,9 +2503,9 @@ using MORK
         end
 
         @testset "wz_meet_into! — disjoint → None (empty result)" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "a"), 1)
-            src = PathMap{V}()
+            src = PM{V}()
             set_val_at!(src, collect(UInt8, "b"), 2)
 
             z     = write_zipper(m)
@@ -2514,10 +2517,10 @@ using MORK
         end
 
         @testset "wz_meet_into! — common key survives" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "ab"), 1)
             set_val_at!(m, collect(UInt8, "ac"), 2)
-            src = PathMap{V}()
+            src = PM{V}()
             set_val_at!(src, collect(UInt8, "ab"), 99)
 
             z     = write_zipper(m)
@@ -2531,9 +2534,9 @@ using MORK
 
         @testset "wz_subtract_into! — a - a = None" begin
             # Use UInt32 which has psubtract defined (saturating subtract)
-            m2 = PathMap{UInt32}()
+            m2 = PM{UInt32}()
             set_val_at!(m2, collect(UInt8, "x"), UInt32(5))
-            src2 = PathMap{UInt32}()
+            src2 = PM{UInt32}()
             set_val_at!(src2, collect(UInt8, "x"), UInt32(5))
 
             z2    = write_zipper(m2)
@@ -2545,7 +2548,7 @@ using MORK
         end
 
         @testset "wz_subtract_into! — a - empty = Identity" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "x"), 5)
 
             z   = write_zipper(m)
@@ -2556,7 +2559,7 @@ using MORK
         end
 
         @testset "wz_restrict! — empty src → None" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "abc"), 1)
 
             z  = write_zipper(m)
@@ -2565,9 +2568,9 @@ using MORK
         end
 
         @testset "wz_restrict! — src superset → Identity" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "a"), 1)
-            src = PathMap{V}()
+            src = PM{V}()
             set_val_at!(src, collect(UInt8, "a"), 2)
             set_val_at!(src, collect(UInt8, "b"), 3)
 
@@ -2585,7 +2588,7 @@ using MORK
         # ==================================================================
 
         @testset "wz_remove_branches! — removes all branches" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "ab"), 1)
             set_val_at!(m, collect(UInt8, "ac"), 2)
             z = write_zipper(m)
@@ -2594,13 +2597,13 @@ using MORK
         end
 
         @testset "wz_remove_branches! — empty returns false" begin
-            m = PathMap{V}()
+            m = PM{V}()
             z = write_zipper(m)
             @test !wz_remove_branches!(z, false)
         end
 
         @testset "wz_prune_path! removes dangling path" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "abc"), 1)
             z = write_zipper(m)
             wz_descend_to!(z, collect(UInt8, "abc"))
@@ -2611,7 +2614,7 @@ using MORK
         end
 
         @testset "wz_create_path! creates dangling path" begin
-            m = PathMap{V}()
+            m = PM{V}()
             z = write_zipper(m)
             wz_descend_to!(z, collect(UInt8, "xyz"))
             created = wz_create_path!(z)
@@ -2621,7 +2624,7 @@ using MORK
         end
 
         @testset "wz_get_or_set_val! sets default when absent" begin
-            m = PathMap{V}()
+            m = PM{V}()
             z = write_zipper(m)
             wz_descend_to!(z, collect(UInt8, "k"))
             v = wz_get_or_set_val!(z, 42)
@@ -2630,7 +2633,7 @@ using MORK
         end
 
         @testset "wz_get_or_set_val! returns existing when present" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "k"), 7)
             z = write_zipper(m)
             wz_descend_to!(z, collect(UInt8, "k"))
@@ -2643,7 +2646,7 @@ using MORK
         # ==================================================================
 
         @testset "wz_child_mask / wz_child_count at root" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "ab"), 1)
             set_val_at!(m, collect(UInt8, "ac"), 2)
             z = write_zipper(m)
@@ -2654,7 +2657,7 @@ using MORK
         end
 
         @testset "wz_descend_first_byte! / wz_ascend_byte!" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "a"), 1)
             set_val_at!(m, collect(UInt8, "b"), 2)
             z = write_zipper(m)
@@ -2666,7 +2669,7 @@ using MORK
         end
 
         @testset "wz_to_next_sibling_byte!" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "a"), 1)
             set_val_at!(m, collect(UInt8, "b"), 2)
             set_val_at!(m, collect(UInt8, "c"), 3)
@@ -2683,7 +2686,7 @@ using MORK
         end
 
         @testset "wz_reset!" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "abc"), 1)
             z = write_zipper(m)
             wz_descend_to!(z, collect(UInt8, "abc"))
@@ -2693,7 +2696,7 @@ using MORK
         end
 
         @testset "wz_val_count" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "a"), 1)
             set_val_at!(m, collect(UInt8, "b"), 2)
             set_val_at!(m, collect(UInt8, "ba"), 3)
@@ -2706,7 +2709,7 @@ using MORK
         end
 
         @testset "wz_take_focus!" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "ab"), 1)
             set_val_at!(m, collect(UInt8, "ac"), 2)
             z = write_zipper(m)
@@ -2718,7 +2721,7 @@ using MORK
         end
 
         @testset "tr_get_focus_anr" begin
-            m = PathMap{V}()
+            m = PM{V}()
             set_val_at!(m, collect(UInt8, "x"), 5)
             # Empty path → at root boundary, node_key is empty → ANRBorrowedRc
             t = trie_ref_at_path(m, UInt8[])
@@ -2736,7 +2739,7 @@ using MORK
 
         @testset "TrieRef — basic path_exists / val / child_count (trie_ref_test1)" begin
             keys = ["Hello", "Hell", "Help", "Helsinki"]
-            m = PathMap{UnitVal}()
+            m = PM{UnitVal}()
             for k in keys
                 set_val_at!(m, collect(UInt8, k), UNIT_VAL)
             end
@@ -2775,7 +2778,7 @@ using MORK
 
         @testset "TrieRef — child_count / child_mask at 'H'" begin
             keys = ["Hello", "Hell", "Help", "Helsinki"]
-            m = PathMap{UnitVal}()
+            m = PM{UnitVal}()
             for k in keys; set_val_at!(m, collect(UInt8, k), UNIT_VAL); end
 
             tr0 = trie_ref_at_path(m, collect(UInt8, "H"))
@@ -2804,7 +2807,7 @@ using MORK
         @testset "TrieRef — trie_ref_test2: val_count + fork_read_zipper + make_map" begin
             rs = ["arrow", "bow", "cannon", "roman", "romane", "romanus^", "romulus",
                   "rubens", "ruber", "rubicon", "rubicundus", "rom'i"]
-            m = PathMap{Int}()
+            m = PM{Int}()
             for (i, r) in enumerate(rs)
                 set_val_at!(m, collect(UInt8, r), i)
             end
@@ -2892,11 +2895,11 @@ using MORK
         @testset "DependentZipper (ports dependent_zipper.rs)" begin
 
             @testset "dep_test_1: appended .postfix to each path" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 words = ["arrow","bow","cannon","roman","romane","romanus","romulus"]
                 for (i,w) in enumerate(words); set_val_at!(m, collect(UInt8,w), i); end
 
-                postfix_m = PathMap{Int}()
+                postfix_m = PM{Int}()
                 set_val_at!(postfix_m, collect(UInt8,".postfix"), 0)
 
                 dpz = DependentZipper(read_zipper(m), nothing,
@@ -2916,7 +2919,7 @@ using MORK
             end
 
             @testset "factor_count and at_root" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 set_val_at!(m, collect(UInt8,"a"), 1)
                 dpz = DependentZipper(read_zipper(m), nothing, (p,_,_) -> (p,nothing))
                 @test dpz_factor_count(dpz) == 1
@@ -2928,7 +2931,7 @@ using MORK
         @testset "Counters (ports counters.rs)" begin
 
             @testset "count_occupancy basic stats" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 for w in ["a","b","ba","bb","c"]
                     set_val_at!(m, collect(UInt8,w), 1)
                 end
@@ -2938,7 +2941,7 @@ using MORK
             end
 
             @testset "empty map returns zero counters" begin
-                c = count_occupancy(PathMap{Int}())
+                c = count_occupancy(PM{Int}())
                 @test total_nodes(c) == 0
                 @test total_child_items(c) == 0
             end
@@ -2948,7 +2951,7 @@ using MORK
         @testset "PathsSerialization (ports paths_serialization.rs)" begin
 
             @testset "serialize + deserialize round-trip" begin
-                m = PathMap{UnitVal}()
+                m = PM{UnitVal}()
                 words = ["arrow","bow","cannon","roman","romane","romulus","rubens","ruber"]
                 for w in words; set_val_at!(m, collect(UInt8, w), UNIT_VAL); end
 
@@ -2957,7 +2960,7 @@ using MORK
                 @test stats.path_count == length(words)
                 @test stats.bytes_out > 0
 
-                m2 = PathMap{UnitVal}()
+                m2 = PM{UnitVal}()
                 seekstart(buf)
                 stats2 = deserialize_paths(m2, buf, UNIT_VAL)
                 @test stats2.path_count == length(words)
@@ -2969,7 +2972,7 @@ using MORK
             end
 
             @testset "auxdata round-trip preserves values" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 pairs = [("a", 1), ("b", 2), ("ba", 3)]
                 for (w, v) in pairs; set_val_at!(m, collect(UInt8, w), v); end
 
@@ -2978,7 +2981,7 @@ using MORK
                 serialize_paths_with_auxdata(m, buf, (_, _, v) -> push!(collected_vals, v))
                 @test sort(collected_vals) == [1, 2, 3]
 
-                m2 = PathMap{Int}()
+                m2 = PM{Int}()
                 seekstart(buf)
                 deserialize_paths_with_auxdata(m2, buf, (k, _) -> collected_vals[k+1])
                 for (w, v) in pairs
@@ -3029,7 +3032,7 @@ using MORK
             end
 
             @testset "act_from_zipper + get_val_at round-trip" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 set_val_at!(m, collect(UInt8,"ace"), 1)
                 set_val_at!(m, collect(UInt8,"acf"), 2)
                 set_val_at!(m, collect(UInt8,"bjk"), 3)
@@ -3041,7 +3044,7 @@ using MORK
             end
 
             @testset "ACTZipper navigates compact tree" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 set_val_at!(m, collect(UInt8,"a"), 1)
                 set_val_at!(m, collect(UInt8,"b"), 2)
                 set_val_at!(m, collect(UInt8,"ba"), 3)
@@ -3054,7 +3057,7 @@ using MORK
             end
 
             @testset "act_save + act_open round-trip" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 set_val_at!(m, collect(UInt8,"hello"), 42)
                 tree = act_from_zipper(m, v -> UInt64(v))
                 path = tempname() * ".act"
@@ -3069,7 +3072,7 @@ using MORK
         @testset "Morphisms — catamorphism (ports morphisms.rs)" begin
 
             @testset "cata_side_effect counts values (leaf fold)" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 set_val_at!(m, collect(UInt8,"a"), 1)
                 set_val_at!(m, collect(UInt8,"b"), 2)
                 set_val_at!(m, collect(UInt8,"ba"), 3)
@@ -3082,7 +3085,7 @@ using MORK
             end
 
             @testset "cata_cached same result as side_effect" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 set_val_at!(m, collect(UInt8,"x"), 10)
                 set_val_at!(m, collect(UInt8,"y"), 20)
                 count_se = cata_side_effect(m, (mask, ch, val, path) ->
@@ -3093,7 +3096,7 @@ using MORK
             end
 
             @testset "cata_jumping_cached returns correct value count" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 for i in 1:5
                     set_val_at!(m, [UInt8(i)], i)
                 end
@@ -3104,7 +3107,7 @@ using MORK
             end
 
             @testset "cata_jumping_side_effect provides jump_len" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 set_val_at!(m, collect(UInt8,"abc"), 1)
                 set_val_at!(m, collect(UInt8,"abd"), 2)
                 # With jumping, alg sees "abc"/"abd" with a jump over common prefix
@@ -3118,9 +3121,9 @@ using MORK
             end
 
             @testset "map_hash consistent" begin
-                m1 = PathMap{Int}()
+                m1 = PM{Int}()
                 set_val_at!(m1, collect(UInt8,"a"), 1)
-                m2 = PathMap{Int}()
+                m2 = PM{Int}()
                 set_val_at!(m2, collect(UInt8,"a"), 1)
                 @test map_hash(m1) == map_hash(m2)
                 set_val_at!(m2, collect(UInt8,"b"), 2)
@@ -3132,7 +3135,7 @@ using MORK
         @testset "ProductZipper (ports product_zipper.rs)" begin
 
             @testset "single-factor is equivalent to read_zipper" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 set_val_at!(m, collect(UInt8,"a"), 1)
                 set_val_at!(m, collect(UInt8,"b"), 2)
                 pz = ProductZipper(read_zipper(m))
@@ -3143,10 +3146,10 @@ using MORK
             end
 
             @testset "2-factor product: paths include junction + leaf vals" begin
-                a = PathMap{Int}()
+                a = PM{Int}()
                 set_val_at!(a, collect(UInt8,"x"), 0)
                 set_val_at!(a, collect(UInt8,"y"), 0)
-                b = PathMap{Int}()
+                b = PM{Int}()
                 set_val_at!(b, collect(UInt8,"1"), 1)
                 set_val_at!(b, collect(UInt8,"2"), 2)
 
@@ -3165,9 +3168,9 @@ using MORK
             end
 
             @testset "pz_reset! returns to root" begin
-                a = PathMap{Int}()
+                a = PM{Int}()
                 set_val_at!(a, collect(UInt8,"k"), 1)
-                b = PathMap{Int}()
+                b = PM{Int}()
                 set_val_at!(b, collect(UInt8,"v"), 2)
                 pz = ProductZipper(read_zipper(a), [read_zipper(b)])
                 pz_to_next_val!(pz)
@@ -3181,7 +3184,7 @@ using MORK
         @testset "PrefixZipper (ports prefix_zipper.rs)" begin
 
             @testset "prefix prepended to path space" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 set_val_at!(m, collect(UInt8,"A"), 1)
                 set_val_at!(m, collect(UInt8,"B"), 2)
                 pz = PrefixZipper(collect(UInt8,"prefix."), read_zipper(m))
@@ -3191,7 +3194,7 @@ using MORK
             end
 
             @testset "descend through prefix reaches source" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 set_val_at!(m, collect(UInt8,"X"), 10)
                 pz = PrefixZipper(collect(UInt8,"pre."), read_zipper(m))
                 pz_descend_to!(pz, collect(UInt8,"pre.X"))
@@ -3200,7 +3203,7 @@ using MORK
             end
 
             @testset "off-prefix path does not exist" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 set_val_at!(m, collect(UInt8,"A"), 1)
                 pz = PrefixZipper(collect(UInt8,"pre."), read_zipper(m))
                 pz_descend_to!(pz, collect(UInt8,"wrong.A"))
@@ -3208,7 +3211,7 @@ using MORK
             end
 
             @testset "ascend restores position" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 set_val_at!(m, collect(UInt8,"Y"), 99)
                 pz = PrefixZipper(collect(UInt8,"pre."), read_zipper(m))
                 pz_descend_to!(pz, collect(UInt8,"pre.Y"))
@@ -3218,7 +3221,7 @@ using MORK
             end
 
             @testset "reset restores to root" begin
-                m = PathMap{Int}()
+                m = PM{Int}()
                 set_val_at!(m, collect(UInt8,"Z"), 5)
                 pz = PrefixZipper(collect(UInt8,"p."), read_zipper(m))
                 pz_descend_to!(pz, collect(UInt8,"p.Z"))
@@ -3232,9 +3235,9 @@ using MORK
         @testset "OverlayZipper (ports overlay_zipper.rs)" begin
 
             @testset "union of disjoint maps" begin
-                a = PathMap{Int}()
+                a = PM{Int}()
                 set_val_at!(a, collect(UInt8,"a"), 1)
-                b = PathMap{Int}()
+                b = PM{Int}()
                 set_val_at!(b, collect(UInt8,"b"), 2)
                 oz = OverlayZipper(read_zipper(a), read_zipper(b))
                 @test oz_child_count(oz) == 2
@@ -3243,9 +3246,9 @@ using MORK
             end
 
             @testset "A-value wins over B-value" begin
-                a = PathMap{Int}()
+                a = PM{Int}()
                 set_val_at!(a, collect(UInt8,"k"), 1)
-                b = PathMap{Int}()
+                b = PM{Int}()
                 set_val_at!(b, collect(UInt8,"k"), 2)
                 oz = OverlayZipper(read_zipper(a), read_zipper(b))
                 oz_descend_to!(oz, collect(UInt8,"k"))
@@ -3254,10 +3257,10 @@ using MORK
             end
 
             @testset "to_next_val iterates all overlay values" begin
-                a = PathMap{Int}()
+                a = PM{Int}()
                 set_val_at!(a, collect(UInt8,"a"), 1)
                 set_val_at!(a, collect(UInt8,"b"), 2)
-                b = PathMap{Int}()
+                b = PM{Int}()
                 set_val_at!(b, collect(UInt8,"c"), 3)
                 oz = OverlayZipper(read_zipper(a), read_zipper(b))
                 vals = Int[]
@@ -3268,9 +3271,9 @@ using MORK
             end
 
             @testset "reset restores to root" begin
-                a = PathMap{Int}()
+                a = PM{Int}()
                 set_val_at!(a, collect(UInt8,"abc"), 1)
-                b = PathMap{Int}()
+                b = PM{Int}()
                 oz = OverlayZipper(read_zipper(a), read_zipper(b))
                 oz_descend_to!(oz, collect(UInt8,"abc"))
                 @test oz_is_val(oz)
@@ -3300,7 +3303,7 @@ using MORK
     @testset "ZipperHead (ports zipper_head.rs)" begin
 
         @testset "zipper_head1: write and read back a value" begin
-            m = PathMap{Int}()
+            m = PM{Int}()
             zh = zipper_head(m)
             z = zh_write_zipper_at_exclusive_path(zh, [UInt8(0)])
             wzt_set_val!(z, 0)
@@ -3309,7 +3312,7 @@ using MORK
         end
 
         @testset "zipper_head2: write via zipper at root" begin
-            m = PathMap{Int}()
+            m = PM{Int}()
             zh = zipper_head(m)
             z = zh_write_zipper_at_exclusive_path(zh, UInt8[])
             wzt_descend_to!(z, collect(UInt8, "test"))
@@ -3319,7 +3322,7 @@ using MORK
         end
 
         @testset "zipper_head3: multi-byte path creation" begin
-            m = PathMap{Int}()
+            m = PM{Int}()
             zh = zipper_head(m)
             z = zh_write_zipper_at_exclusive_path(zh, collect(UInt8, "test"))
             wzt_descend_to!(z, collect(UInt8, ":2"))
@@ -3329,7 +3332,7 @@ using MORK
         end
 
         @testset "zipper_head4: existing path visible through zipper" begin
-            m = PathMap{Int}()
+            m = PM{Int}()
             set_val_at!(m, collect(UInt8, "test:3"), 3)
             zh = zipper_head(m)
             z = zh_write_zipper_at_exclusive_path(zh, collect(UInt8, "test"))
@@ -3342,7 +3345,7 @@ using MORK
         end
 
         @testset "exclusive path conflict detection" begin
-            m = PathMap{Int}()
+            m = PM{Int}()
             zh = zipper_head(m)
             z = zh_write_zipper_at_exclusive_path(zh, collect(UInt8, "a"))
             @test_throws Conflict zh_write_zipper_at_exclusive_path(zh, collect(UInt8, "a"))
@@ -3355,7 +3358,7 @@ using MORK
         end
 
         @testset "non-overlapping paths can coexist" begin
-            m = PathMap{Int}()
+            m = PM{Int}()
             zh = zipper_head(m)
             za = zh_write_zipper_at_exclusive_path(zh, collect(UInt8, "a"))
             zb = zh_write_zipper_at_exclusive_path(zh, collect(UInt8, "b"))
