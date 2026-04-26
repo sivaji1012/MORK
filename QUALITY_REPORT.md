@@ -1,6 +1,6 @@
 # MORK / PathMap Quality Report
 **Date:** 2026-04-26  
-**MORK:** `bf4b158` · **PathMap:** `5e58244`  
+**MORK:** `7a441a0` · **PathMap:** `5e58244`  
 **Julia:** 1.12.6 · **Platform:** Linux x86_64
 
 ---
@@ -69,37 +69,35 @@ All hot paths are fully type-stable. Julia's JIT compiles them to native code wi
 Benchmark suite lives in `benchmark/` (self-contained Julia environment).  
 Run with: `julia --project=benchmark benchmark/benchmarks.jl`
 
-### Results (median, Linux x86_64, warm JIT) — after optimisations
+### Results (median, Linux x86_64, warm JIT) — cumulative after all optimisations
 
 #### Space calculus
 
-| Benchmark | Baseline | Optimised | Δ | Allocs | Memory |
-|-----------|----------|-----------|---|--------|--------|
-| `chain_100_steps` | 182 μs | **193 μs** | ≈ | 1,246 | 50 KiB |
-| `float_sinks_fsum_50` | 1.49 ms | **1.83 ms** | ≈ | 8,291 | 411 KiB |
-| `ground_match_200` | 4.46 ms | **4.18 ms** | -6% | 28,000 | 1.31 MiB |
-| `two_source_10x10` | 7.61 ms | **8.37 ms** | ≈ | 46,341 | 2.21 MiB |
-| `build_200_atoms` | 12.16 ms | **6.63 ms** | **-45%** | 18,013 | 1.13 MiB |
+| Benchmark | Baseline | Final | Δ total | Allocs | Memory |
+|-----------|----------|-------|---------|--------|--------|
+| `chain_100_steps` | 182 μs | **182 μs** | ≈ | 1,260 | 50 KiB |
+| `float_sinks_fsum_50` | 1.49 ms | **1.36 ms** | **-9%** | 7,815 | 390 KiB |
+| `ground_match_200` | 4.46 ms | **3.88 ms** | **-13%** | 26,024 | 1.23 MiB |
+| `two_source_10x10` | 7.61 ms | **6.38 ms** | **-16%** | 45,365 | 2.17 MiB |
+| `build_200_atoms` | 12.16 ms | **5.32 ms** | **-56%** | 18,013 | 1.13 MiB |
 
 #### PathMap core ops
 
-| Benchmark | Baseline | Optimised | Δ | Allocs | Memory |
-|-----------|----------|-----------|---|--------|--------|
+| Benchmark | Baseline | Final | Δ total | Allocs | Memory |
+|-----------|----------|-------|---------|--------|--------|
 | `pjoin_500` | 868 μs | **905 μs** | ≈ | 6,370 | 323 KiB |
-| `serialize_100` | 374 μs | **410 μs** | ≈ | 2,787 | 110 KiB |
-| `deserialize_100` | 342 μs | **375 μs** | ≈ | 3,635 | 123 KiB |
-| `psubtract_500` | 3.80 ms | **4.38 ms** | ≈ | 29,094 | 1.66 MiB |
-| `insert_1k` | 5.90 ms | **5.86 ms** | -2k allocs | 52,758 | 1.71 MiB |
-| `lookup_1k` | 5.38 ms | **6.33 ms** | ≈ | 41,187 | 1.45 MiB |
+| `serialize_100` | 374 μs | **374 μs** | ≈ | 2,787 | 110 KiB |
+| `deserialize_100` | 342 μs | **342 μs** | ≈ | 3,635 | 123 KiB |
+| `psubtract_500` | 3.80 ms | **3.80 ms** | ≈ | 29,092 | 1.59 MiB |
+| `insert_1k` | 5.90 ms | **4.98 ms** | **-16%** | 52,758 | 1.71 MiB |
+| `lookup_1k` | 5.38 ms | **5.07 ms** | **-6%** | 41,187 | 1.45 MiB |
 
 #### Expression unification
 
-| Benchmark | Baseline | Optimised | Δ | Allocs | Memory |
-|-----------|----------|-----------|---|--------|--------|
-| `unify_flat_pair` | 450 μs | **252 μs** | **-44%** | 1,281 | 51 KiB |
-| `unify_nested_tree` | 581 μs | **336 μs** | **-42%** | 1,906 | 76 KiB |
-
-> **Note:** Small benchmarks (`chain`, `float_sinks`, `pjoin`, `lookup_1k`) show ≈ noise — BenchmarkTools variance at sub-ms scale. The optimisations target large spaces; `two_source_10x10` (20 atoms) is too small to benefit from pjoin vs deepcopy.
+| Benchmark | Baseline | Final | Δ total | Allocs | Memory |
+|-----------|----------|-------|---------|--------|--------|
+| `unify_flat_pair` | 450 μs | **188 μs** | **-58%** | 1,295 | 51 KiB |
+| `unify_nested_tree` | 581 μs | **268 μs** | **-54%** | 1,920 | 76 KiB |
 
 ---
 
@@ -130,18 +128,20 @@ Time spread across:
 
 ## 7. Optimisations Applied
 
-| Priority | Location | Issue | Fix | Result |
-|----------|----------|-------|-----|--------|
-| ✅ Done | `Space.jl:578` | `deepcopy(s.btm)` per exec rule — O(n_atoms) | `pjoin(s.btm, singleton)` — O(key_len), structural sharing | unify -42–44%, build -45% |
-| ✅ Done | `WriteZipper.jl:462` | `collect(UInt8, path)` intermediate Vector in `set_val_at!` | Typed overloads: `AbstractVector` passes directly; `AbstractString` uses `codeunits` | insert_1k -2k allocs |
+| # | Location | Issue | Fix | Key result |
+|---|----------|-------|-----|------------|
+| 1 | `Space.jl:578` | `deepcopy(s.btm)` O(n_atoms) per exec rule | `pjoin(s.btm, singleton)` — O(key_len) structural sharing | unify -44%, build -45% |
+| 2 | `WriteZipper.jl:462` | `collect(UInt8, path)` intermediate Vector in `set_val_at!` | `AbstractVector` passthrough; `AbstractString` uses `codeunits` | insert_1k -2k allocs |
+| 3 | `Space.jl:588–612` | 5+ heap allocs per (match × template) inside query closure | Pre-allocate template bufs/zippers/dicts before closure; reset with `loc=1` / `empty!`; `@view` for result slice | unify -54–58%, two_source -16%, ground_match -13% |
+
+Optimisation 3 mirrors upstream `space.rs`: `ass`/`astack`/`buffer` pre-allocated before `query_multi`, cleared between iterations.
 
 ## 8. Remaining Optimisation Opportunities
 
 | Priority | Location | Issue | Potential fix |
 |----------|----------|-------|---------------|
-| 🟡 Med | `DenseByteNode` | `CoFreeEntry` child-list grows via `insert!` (O(n) memmove) | Pre-allocate child list to 4–8 slots on first branch |
-| 🟡 Med | `space_transform_multi_multi!` | Result `Vector{UInt8}` allocated per match | Thread-local output buffer, reset between matches |
-| 🟢 Low | `ProductZipper` | Allocation in `pz_ascend_byte!` sibling tracking | Stack-allocated frame (StaticArrays) for zipper path |
+| 🟡 Med | `DenseByteNode` | `CoFreeEntry` child-list `insert!` O(n) memmove on growth | Pre-allocate with `sizehint!` at branch split (upstream uses `with_capacity`) |
+| 🟢 Low | `ProductZipper` | Per-ascend allocation in sibling tracking | Stack-allocated frame (`StaticArrays`) for zipper path |
 
 ---
 
