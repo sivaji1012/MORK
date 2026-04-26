@@ -570,13 +570,14 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
         end
     end
 
-    # Build read_btm: clone s.btm and re-insert the exec atom (add_expr).
-    # Mirrors upstream: `let mut read_copy = self.btm.clone(); read_copy.insert(add.span(), ())`.
-    # This enables self-referential exec rules — the exec atom was removed from s.btm
-    # before interpret was called, but re-inserting it here lets pattern (, (exec ...))
-    # match the atom that triggered the current transform.
-    read_btm = deepcopy(s.btm)
-    set_val_at!(read_btm, add_expr.buf, UNIT_VAL)
+    # Build read_btm: s.btm + exec atom re-inserted.
+    # Mirrors upstream space.rs: `let mut read_copy = self.btm.clone(); read_copy.insert(add.span(), ())`.
+    # In Rust, PathMap::clone() is O(1) — Arc refcount bump with COW on first write.
+    # Replaced deepcopy (O(n)) with pjoin against a single-entry map: shares all trie
+    # nodes structurally via TrieNodeODRc refcounts; only the spine to add_expr is new.
+    _exec_singleton = PathMap{UnitVal}()
+    set_val_at!(_exec_singleton, add_expr.buf, UNIT_VAL)
+    read_btm = pjoin(s.btm, _exec_singleton).value  # unwrap AlgResElement
 
     # space_query_multi_i uses s.mmaps for ACT file caching (I-pattern)
     query_fn = no_source ? space_query_multi :
