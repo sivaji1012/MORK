@@ -1,5 +1,9 @@
 # MORK.jl
 
+[![CI](https://github.com/sivaji1012/MORK/actions/workflows/ci.yml/badge.svg)](https://github.com/sivaji1012/MORK/actions/workflows/ci.yml)
+[![Julia 1.10+](https://img.shields.io/badge/Julia-1.10%2B-blue)](https://julialang.org)
+[![v0.1.0](https://img.shields.io/badge/version-v0.1.0-orange)](https://github.com/sivaji1012/MORK/releases/tag/v0.1.0)
+
 A Julia implementation of the MORK knowledge-graph engine —
 the high-performance, trie-native substrate for
 [Hyperon](https://wiki.opencog.org/w/Hyperon) / MeTTa systems.
@@ -60,6 +64,21 @@ Pkg.develop(path = "/path/to/MORK")
 
 Requires Julia ≥ 1.10.
 Dependencies: `PathMap.jl` (bundled), `HTTP.jl`, `JSON3.jl`, `SHA.jl`.
+
+> **Note**: MORK.jl is not yet registered in the Julia General Registry.
+> Clone the repo and use `Pkg.develop` as shown above.
+
+## Benchmarks
+
+Run the included benchmark suite:
+
+```bash
+julia --project=. benchmarks/benchmarks.jl
+```
+
+Covers space construction, ground/variable pattern matching (10–100 atoms),
+two-source join, float-reduction sinks, and expression parsing.
+Pass `--tune` for longer calibration.
 
 ---
 
