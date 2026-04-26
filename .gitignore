@@ -1,0 +1,21 @@
+# Claude Code local settings — not for public repos
+.claude/
+
+# Julia artifacts
+*.jl.cov
+*.jl.mem
+*.orig
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Runtime / temp
+/tmp/
+*.act
