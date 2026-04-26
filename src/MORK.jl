@@ -91,4 +91,7 @@ version() = v"0.1.0"
 export version
 export HTTP
 
+# PrecompileTools workload — caches hot method instances during Pkg.precompile().
+include("precompile.jl")
+
 end # module MORK

@@ -65,3 +65,16 @@ using MORK, PathMap, Test
 
     println("All prefix ops tests passed.")
 end
+
+    # ── Regression: insert_prefix on single-value map (Int32) ────────
+    # Bug: set_recursive in LineListNode used `res === nothing` instead of
+    # `res isa TrieNodeODRc`, passing Bool to SetPayloadUpgrade constructor.
+    # Triggered when new key is a strict prefix of an existing value key.
+    @testset "insert_prefix regression — key prefix of existing value key" begin
+        m = PathMap.PathMap{UInt32}()
+        set_val_at!(m, b"foo:bar", UInt32(99))
+        wz = write_zipper_at_path(m, b"foo:")
+        @test wz_insert_prefix!(wz, b"ns:") == true
+        @test get_val_at(m, b"ns:foo:bar") == UInt32(99)
+        @test get_val_at(m, b"foo:bar") === nothing
+    end

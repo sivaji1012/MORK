@@ -2,7 +2,7 @@
 
 julia_version = "1.12.6"
 manifest_format = "2.0"
-project_hash = "05830093e85920c3ca553074dd72d272f6a1a054"
+project_hash = "26b18af03d02a119c9d283f6e6dd6aebdb29cd26"
 
 [[deps.ArgTools]]
 uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
@@ -179,7 +179,7 @@ uuid = "6f1432cf-f94c-5a45-995e-cdbf5db27b0b"
 version = "3.5.1"
 
 [[deps.MORK]]
-deps = ["Base64", "HTTP", "JET", "PathMap", "PropCheck", "SHA", "Zlib_jll"]
+deps = ["Base64", "HTTP", "JET", "JSON3", "PathMap", "PropCheck", "SHA", "Zlib_jll"]
 path = "."
 uuid = "162375cb-4023-4ef9-895b-22c0041d5c13"
 version = "0.1.0"
@@ -241,7 +241,7 @@ uuid = "69de0a69-1ddd-5017-9359-2bf0b02dc9f0"
 version = "2.8.3"
 
 [[deps.PathMap]]
-deps = ["Zlib_jll"]
+deps = ["PrecompileTools", "Zlib_jll"]
 path = "/home/shivaji1012/PRIMUS/packages/PathMap"
 uuid = "a8b3d4e5-f012-4567-89ab-cdef01234567"
 version = "0.3.0"
