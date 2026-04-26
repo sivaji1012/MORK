@@ -217,37 +217,66 @@ ez_finish_span(z::ExprZipper) = view(z.root.buf, 1:z.loc-1)
 """
     expr_serialize(bytes) → String
 
-Convert a flat byte-encoded expression to a human-readable string.
-Mirrors `serialize` in mork_expr.
+Convert a flat byte-encoded expression to a human-readable s-expression string.
+Mirrors `SerializerTraversal` in mork_expr (produces parenthesized s-expressions).
 """
 function expr_serialize(bytes::AbstractVector{UInt8}) :: String
-    io  = IOBuffer()
-    i   = 1
-    first = true
+    io = IOBuffer()
+    # Stack tracks (children_remaining) for open arity nodes.
+    # When children_remaining hits 0 we close with ')'.
+    stack = Int[]
+    transient = false   # true = need a space before next element
+
+    i = 1
     while i <= length(bytes)
-        !first && write(io, ' ')
-        first = false
-        b = bytes[i]
-        tag = byte_item(b)
-        if tag isa ExprNewVar
-            write(io, '$')
-            i += 1
-        elseif tag isa ExprVarRef
-            write(io, "_$(tag.idx + 1)")
-            i += 1
-        elseif tag isa ExprArity
-            write(io, "[$(tag.arity)]")
+        tag = byte_item(bytes[i])
+
+        if tag isa ExprArity
+            transient && write(io, ' ')
+            write(io, '(')
+            transient = false
+            push!(stack, Int(tag.arity))
             i += 1
         elseif tag isa ExprSymbol
-            s = Int(tag.size)
+            transient && write(io, ' ')
+            n = Int(tag.size)
             i += 1
-            for j in i:min(i+s-1, length(bytes))
+            for j in i:min(i+n-1, length(bytes))
                 cb = bytes[j]
                 (isprint(Char(cb)) && cb != UInt8('\\')) ?
                     write(io, Char(cb)) : write(io, "\\x$(string(cb, base=16, pad=2))")
             end
-            i += s
+            i += n
+            transient = true
+        elseif tag isa ExprNewVar
+            transient && write(io, ' ')
+            write(io, '$')
+            i += 1
+            transient = true
+        elseif tag isa ExprVarRef
+            transient && write(io, ' ')
+            write(io, "_$(Int(tag.idx) + 1)")
+            i += 1
+            transient = true
+        else
+            i += 1
         end
+
+        # Close any fully-consumed arity nodes
+        while !isempty(stack)
+            stack[end] -= 1
+            if stack[end] < 0
+                pop!(stack)
+                write(io, ')')
+                transient = true
+            else
+                break
+            end
+        end
+    end
+    # Close any unclosed parens (shouldn't happen in well-formed expressions)
+    for _ in stack
+        write(io, ')')
     end
     String(take!(io))
 end

@@ -1,39 +1,37 @@
 #!/usr/bin/env julia
-# tools/mork_repl.jl — interactive Julia REPL with MORK pre-loaded
+# tools/mork_repl.jl — MORK development REPL
 #
-# Usage:
-#   julia --project=. tools/mork_repl.jl
+# Interactive (recommended — hot-reload + full REPL):
+#   julia --project=. -i tools/mork_repl.jl
 #
-# MORK is loaded once. Type Julia expressions at the prompt.
-# Commands:
-#   :q   quit
-#   :t   run test suite
+# Scripted (agent/CI — pipe one expression per line):
+#   echo 'include("/tmp/test.jl")' | julia --project=. tools/mork_repl.jl
+
+# Revise: optional hot-reload — src/ changes reload without restarting
+try; using Revise; catch; end
 
 using MORK
 
-println("MORK v", MORK.version(), " loaded. Type Julia or :q to quit.")
+mc(src, n=999_999) = (s=new_space(); space_add_all_sexpr!(s,src); space_metta_calculus!(s,n); space_dump_all_sexpr(s))
+t(path=joinpath(@__DIR__,"..","test","runtests.jl")) = include(path)
 
-mc(src, n=999_999) = begin
-    s = new_space()
-    space_add_all_sexpr!(s, src)
-    space_metta_calculus!(s, n)
-    space_dump_all_sexpr(s)
-end
-
-while true
-    print("mork> ")
-    line = readline()
-    isempty(line) && continue
-    line == ":q" && break
-    if line == ":t"
-        include(joinpath(@__DIR__, "..", "test", "runtests.jl"))
-        continue
+if isinteractive()
+    println("MORK v", MORK.version(), " loaded.")
+    println("  t()            — run full test suite")
+    println("  t(\"path\")      — run specific test file")
+    println("  mc(src)        — eval s-expr through metta_calculus")
+    println("  Ctrl-D         — quit")
+else
+    local failed = false
+    for line in eachline(stdin)
+        isempty(strip(line)) && continue
+        try
+            result = eval(Meta.parse(line))
+            result !== nothing && println(result)
+        catch e
+            println("ERROR: ", e)
+            failed = true
+        end
     end
-    try
-        suppress = endswith(rstrip(line), ';')
-        result = eval(Meta.parse(line))
-        !suppress && result !== nothing && println(result)
-    catch e
-        println("ERROR: ", e)
-    end
+    exit(failed ? 1 : 0)
 end

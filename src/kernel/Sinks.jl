@@ -122,30 +122,30 @@ sink_finalize!(s::AddSink, ::PathMap{UnitVal}) :: Bool = s.changed
 Collect paths to remove, then subtract them from BTM on finalize.
 Mirrors `RemoveSink` in sinks.rs.
 """
+# Upstream: collects paths into an internal PathMap, then calls wz.subtract_into
+# on finalize — one trie-level operation instead of N individual removes.
 mutable struct RemoveSink <: AbstractSink
-    expr    ::MORK.Expr
-    to_remove::Vector{Vector{UInt8}}
+    expr   ::MORK.Expr
+    remove ::PathMap{UnitVal}
 end
 
-RemoveSink(e::MORK.Expr) = RemoveSink(e, Vector{UInt8}[])
+RemoveSink(e::MORK.Expr) = RemoveSink(e, PathMap{UnitVal}())
 
 function sink_apply!(s::RemoveSink, bindings::Dict{ExprVar,ExprEnv},
                      path::Vector{UInt8}, btm::PathMap{UnitVal})
     length(path) > 3 || return
-    push!(s.to_remove, path[4:end])
+    set_val_at!(s.remove, path[4:end], UNIT_VAL)
 end
 
 function sink_finalize!(s::RemoveSink, btm::PathMap{UnitVal}) :: Bool
+    # Subtract collected paths from btm using per-path removal.
     changed = false
-    for p in s.to_remove
-        old = get_val_at(btm, p)
-        if old !== nothing || begin
-            # check if path exists as a key (for PathMap{UnitVal}, old===nothing always)
-            wz = write_zipper(btm)
-            wz_descend_to!(wz, p)
-            v = wz_remove_val!(wz, true)
-            v !== nothing
-        end
+    rz = read_zipper(s.remove)
+    while zipper_to_next_val!(rz)
+        path = collect(zipper_path(rz))
+        old = get_val_at(btm, path)
+        if old !== nothing
+            remove_val_at!(btm, path)
             changed = true
         end
     end
@@ -162,55 +162,65 @@ end
 Keep at most `max` lexicographically smallest paths.
 Mirrors `HeadSink` in sinks.rs.
 """
+# Upstream: collects paths into an internal PathMap (not Vector).
+# top tracks the lexicographically largest path in head (for O(1) displacement check).
+# finalize uses wz_join_into! (one trie-level merge instead of N individual inserts).
 mutable struct HeadSink <: AbstractSink
-    expr    ::MORK.Expr
-    head    ::Vector{Vector{UInt8}}   # collected paths
-    skip    ::Int                     # bytes to skip in each matched path
-    max     ::Int
+    expr  ::MORK.Expr
+    head  ::PathMap{UnitVal}  # collected paths — mirrors upstream PathMap<()>
+    skip  ::Int
+    count ::Int
+    max   ::Int
+    top   ::Vector{UInt8}     # largest path in head (mirrors upstream top: Vec<u8>)
 end
 
 function HeadSink(e::MORK.Expr)
     buf = e.buf
-    # Expect [3] head <num_symbol> <pattern>
-    # skip = 1 (arity) + 1+4 (head symbol) + 1+len(num) bytes
-    # parse max from the third child
-    skip = 6   # [3] head = 6 bytes minimum; runtime parsing below
-    if length(buf) >= 7 && byte_item(buf[1]) isa ExprArity
-        # buf[1]=Arity(3), buf[2]=SymbolSize(4), buf[3..6]='head', buf[7]=num symbol
-        if length(buf) >= 8
-            num_tag = byte_item(buf[7])
-            if num_tag isa ExprSymbol
-                num_str = String(buf[8 : 7 + Int(num_tag.size)])
-                max_n   = tryparse(Int, num_str)
-                skip    = 1 + 1 + 4 + 1 + Int(num_tag.size)  # arity+head_sym+num_sym
-                max_n !== nothing && return HeadSink(e, Vector{UInt8}[], skip, max_n)
+    skip = 6
+    max_n = 10
+    if length(buf) >= 8 && byte_item(buf[1]) isa ExprArity
+        num_tag = byte_item(buf[7])
+        if num_tag isa ExprSymbol
+            num_str = String(buf[8 : 7 + Int(num_tag.size)])
+            parsed  = tryparse(Int, num_str)
+            if parsed !== nothing
+                skip  = 1 + 1 + 4 + 1 + Int(num_tag.size)
+                max_n = parsed
             end
         end
     end
-    HeadSink(e, Vector{UInt8}[], skip, 10)  # default max=10
+    HeadSink(e, PathMap{UnitVal}(), skip, 0, max_n, UInt8[])
 end
 
 function sink_apply!(s::HeadSink, bindings::Dict{ExprVar,ExprEnv},
                      path::Vector{UInt8}, btm::PathMap{UnitVal})
     length(path) <= s.skip && return
     mpath = path[s.skip+1:end]
-    if length(s.head) < s.max
-        push!(s.head, mpath)
-        sort!(s.head)
-    elseif mpath < s.head[end]
-        s.head[end] = mpath
-        sort!(s.head)
+    if s.count == s.max
+        # At capacity: only accept if mpath < top (displaces current largest)
+        if mpath >= s.top
+            return  # doesn't displace
+        end
+        set_val_at!(s.head, mpath, UNIT_VAL)
+        remove_val_at!(s.head, s.top)
+        # find new top: descend to last path in head trie
+        rz = read_zipper(s.head)
+        zipper_descend_last_path!(rz)
+        s.top = collect(zipper_path(rz))
+    else
+        if set_val_at!(s.head, mpath, UNIT_VAL) === nothing  # newly inserted
+            s.count += 1
+            if isempty(s.top) || mpath > s.top
+                s.top = copy(mpath)
+            end
+        end
     end
 end
 
 function sink_finalize!(s::HeadSink, btm::PathMap{UnitVal}) :: Bool
-    changed = false
-    for p in s.head
-        old = get_val_at(btm, p)
-        set_val_at!(btm, p, UNIT_VAL)
-        old === nothing && (changed = true)
-    end
-    changed
+    wz = write_zipper(btm)
+    status = wz_join_into!(wz, s.head.root)
+    status != ALG_STATUS_IDENTITY
 end
 
 # =====================================================================
@@ -220,33 +230,63 @@ end
 """
     CountSink
 
-Count unique matched expressions and store the count at a fixed key.
+Count unique source values per output template, then store the count.
 Mirrors `CountSink` in sinks.rs.
+
+Accumulating sink: sink_apply! collects sources, sink_finalize! counts and writes.
+Used by space_transform_multi_multi! as a persistent sink (not per-match).
 """
 mutable struct CountSink <: AbstractSink
-    expr    ::MORK.Expr
-    unique  ::PathMap{UnitVal}
-    skip    ::Int
+    expr        ::MORK.Expr
+    # Groups: (template_bytes → unique_sources PathMap)
+    # Each template may be different across matches (different outer bindings).
+    by_template ::Vector{Tuple{Vector{UInt8}, PathMap{UnitVal}}}
 end
 
-function CountSink(e::MORK.Expr)
-    # [4] count <result> <source> <pattern> — skip varies
-    CountSink(e, PathMap{UnitVal}(), 0)
-end
+CountSink(e::MORK.Expr) = CountSink(e, Tuple{Vector{UInt8}, PathMap{UnitVal}}[])
 
 function sink_apply!(s::CountSink, bindings::Dict{ExprVar,ExprEnv},
                      path::Vector{UInt8}, btm::PathMap{UnitVal})
-    set_val_at!(s.unique, path, UNIT_VAL)
+    # path = bound expression bytes: (count <template> <var> <source>)
+    # Parse the 4-arg count expression to extract template and source.
+    length(path) < 7 && return
+    args = ExprEnv[]
+    ee_args!(ExprEnv(UInt8(0), UInt8(0), UInt32(0), MORK.Expr(path)), args)
+    length(args) < 4 && return
+
+    # Extract template bytes (arg2) and source bytes (arg4)
+    tpl_start = Int(args[2].offset) + 1
+    tpl_end   = _expr_end_offset(path, tpl_start)
+    tpl_bytes = path[tpl_start : tpl_end-1]
+
+    src_start = Int(args[4].offset) + 1
+    src_end   = _expr_end_offset(path, src_start)
+    src_bytes = path[src_start : src_end-1]
+
+    # Find or create the entry for this template
+    entry = findfirst(t -> t[1] == tpl_bytes, s.by_template)
+    if entry === nothing
+        push!(s.by_template, (tpl_bytes, PathMap{UnitVal}()))
+        entry = length(s.by_template)
+    end
+    set_val_at!(s.by_template[entry][2], src_bytes, UNIT_VAL)
 end
 
 function sink_finalize!(s::CountSink, btm::PathMap{UnitVal}) :: Bool
-    cnt = val_count(s.unique)
-    cnt_bytes = Vector{UInt8}(string(cnt))
-    key = vcat(UInt8[item_byte(ExprSymbol(UInt8(length(cnt_bytes))))], cnt_bytes)
-    old = get_val_at(btm, key)
-    set_val_at!(btm, key, UNIT_VAL)
-    old === nothing
+    changed = false
+    for (tpl_bytes, sources) in s.by_template
+        cnt     = val_count(sources)
+        cnt_str = string(cnt)
+        cnt_mork = vcat(item_byte(ExprSymbol(UInt8(length(cnt_str)))), Vector{UInt8}(cnt_str))
+        out = _pure_substitute_first_var(tpl_bytes, 1, length(tpl_bytes), cnt_mork)
+        out === nothing && continue
+        old = get_val_at(btm, out)
+        set_val_at!(btm, out, UNIT_VAL)
+        old === nothing && (changed = true)
+    end
+    changed
 end
+
 
 # =====================================================================
 # SumSink — [4] sum <result_sym> <source_sym> <expr>: sum matched values
@@ -337,32 +377,351 @@ end
 
 struct ACTSink  <: AbstractSink; expr::MORK.Expr; end
 struct WASMSink <: AbstractSink; expr::MORK.Expr; end
-struct PureSink <: AbstractSink; expr::MORK.Expr; end
 struct Z3Sink   <: AbstractSink; expr::MORK.Expr; end
 struct USink    <: AbstractSink; expr::MORK.Expr; end
 struct AUSink   <: AbstractSink; expr::MORK.Expr; end
 struct HashSink <: AbstractSink; expr::MORK.Expr; end
 
-for T in (ACTSink, WASMSink, PureSink, Z3Sink, USink, AUSink, HashSink)
+for T in (ACTSink, WASMSink, Z3Sink, USink, AUSink, HashSink)
     @eval sink_apply!(::$T, ::Dict, ::Vector{UInt8}, ::PathMap{UnitVal}) =
         error($(string(T)) * " not yet ported")
     @eval sink_finalize!(::$T, ::PathMap{UnitVal}) =
         error($(string(T)) * " not yet ported")
 end
 
+# =====================================================================
+# PureSink — port of PureSink in sinks.rs
+# (pure <template> <var> <formula>)
+# Evaluates <formula> using PURE_OPS, substitutes result into <template>,
+# and stores the result in the space.
+# =====================================================================
+
+mutable struct PureSink <: AbstractSink
+    expr    ::MORK.Expr
+    changed ::Bool
+end
+PureSink(e::MORK.Expr) = PureSink(e, false)
+
+"""
+    _pure_eval_formula(buf, off) → Union{Vector{UInt8}, Nothing}
+
+Recursively evaluate a pure-ops formula rooted at byte offset `off` (1-based).
+
+INVARIANT: returns a COMPLETE MORK sub-expression (header byte included):
+  - Scalar symbol result  → ExprSymbol(n) + payload bytes
+  - Compound expression   → ExprArity(n) + children (for `tuple`, `explode_symbol`, `quote`)
+  - Skip signal           → nothing  (e.g. `ifnz` with zero cond and no else)
+
+Args passed to `pure_apply` are stripped of their header (raw payloads).
+
+Mirrors EvalScope::eval in experiments/eval/src/lib.rs.
+"""
+function _pure_eval_formula(buf::Vector{UInt8}, off::Int) :: Union{Vector{UInt8}, Nothing}
+    off > length(buf) && return nothing
+    tag = byte_item(buf[off])
+
+    if tag isa ExprSymbol
+        # Return complete MORK symbol (header + payload)
+        n = Int(tag.size)
+        return buf[off : off+n]
+    end
+
+    if tag isa ExprArity
+        n_args = Int(tag.arity) - 1   # first child is the functor name
+        n_args < 0 && return nothing
+
+        # Parse functor name
+        fn_off = off + 1
+        fn_tag = byte_item(buf[fn_off])
+        fn_tag isa ExprSymbol || return nothing
+        fn_size = Int(fn_tag.size)
+        fn_name = String(buf[fn_off+1 : fn_off+fn_size])
+
+        # Collect arg byte spans
+        arg_spans = UnitRange{Int}[]
+        cur = fn_off + 1 + fn_size
+        for _ in 1:n_args
+            cur > length(buf) && break
+            span_end = _expr_end_offset(buf, cur)
+            push!(arg_spans, cur:span_end-1)
+            cur = span_end
+        end
+
+        # ── ifnz: short-circuit conditional ──────────────────────────
+        if fn_name == "ifnz" && length(arg_spans) >= 3
+            cond = _pure_eval_formula(buf, first(arg_spans[1]))
+            cond === nothing && return nothing
+            cond_payload = _pure_strip_header(cond)
+            is_nz = !all(==(0x00), cond_payload)
+            # arg_spans[2] is the "then" keyword — skip it
+            if is_nz
+                return _pure_eval_formula(buf, first(arg_spans[3]))
+            elseif length(arg_spans) == 5
+                return _pure_eval_formula(buf, first(arg_spans[5]))
+            else
+                return nothing
+            end
+        end
+
+        # ── quote: return the inner expression bytes verbatim ─────────
+        if fn_name == "'" && length(arg_spans) >= 1
+            return buf[arg_spans[1]]
+        end
+
+        # ── Evaluate all args eagerly; pass raw payloads to pure_apply ─
+        arg_results = Vector{UInt8}[]
+        for span in arg_spans
+            r = _pure_eval_formula(buf, first(span))
+            r === nothing && return nothing
+            push!(arg_results, _pure_strip_header(r))
+        end
+
+        # Ops that return full MORK expressions (not scalar payloads)
+        if fn_name == "tuple" || fn_name == "explode_symbol"
+            f = get(PURE_OPS, fn_name, nothing)
+            f === nothing && return nothing
+            result_mork = try f(arg_results) catch; return nothing end
+            return result_mork isa Vector{UInt8} ? result_mork : nothing
+        end
+
+        # Standard scalar ops: get payload, wrap as ExprSymbol
+        result_payload = try
+            pure_apply(fn_name, arg_results)
+        catch
+            return nothing
+        end
+        n = length(result_payload)
+        n == 0 && return nothing
+        return vcat(item_byte(ExprSymbol(UInt8(n))), result_payload)
+    end
+
+    nothing
+end
+
+"""
+    _pure_strip_header(mork_expr) → Vector{UInt8}
+
+Strip the leading ExprSymbol header byte from a scalar MORK expression to get
+raw payload bytes. For arity expressions (tuple etc.), return as-is.
+"""
+function _pure_strip_header(mork_expr::Vector{UInt8}) :: Vector{UInt8}
+    isempty(mork_expr) && return mork_expr
+    tag = try byte_item(mork_expr[1]) catch; return mork_expr end
+    tag isa ExprSymbol ? mork_expr[2:end] : mork_expr
+end
+
+"""
+    _expr_end_offset(buf, off) → Int
+
+Return the offset just past the expression starting at `off` (exclusive end).
+"""
+function _expr_end_offset(buf::Vector{UInt8}, off::Int) :: Int
+    off > length(buf) && return off
+    tag = byte_item(buf[off])
+    if tag isa ExprSymbol
+        return off + 1 + Int(tag.size)
+    elseif tag isa ExprArity
+        cur = off + 1
+        for _ in 1:Int(tag.arity)
+            cur > length(buf) && break
+            cur = _expr_end_offset(buf, cur)
+        end
+        return cur
+    elseif tag isa ExprNewVar || tag isa ExprVarRef
+        return off + 1
+    end
+    off + 1
+end
+
+function sink_apply!(s::PureSink, bindings::Dict, path::Vector{UInt8}, btm::PathMap{UnitVal})
+    buf = s.expr.buf
+    length(buf) < 2 || byte_item(buf[1]) isa ExprArity || return
+
+    # Parse (pure <template> <var> <formula>) — 4 children
+    args = ExprEnv[]
+    ee_args!(ExprEnv(UInt8(0), UInt8(0), UInt32(0), s.expr), args)
+    length(args) < 4 && return
+
+    # Extract sub-expression byte spans
+    tpl_ee     = args[2]
+    formula_ee = args[4]
+
+    tpl_start     = Int(tpl_ee.offset) + 1
+    formula_start = Int(formula_ee.offset) + 1
+    tpl_buf     = tpl_ee.base.buf
+    formula_buf = formula_ee.base.buf
+
+    formula_start > length(formula_buf) && return
+
+    # Evaluate formula — returns a complete MORK sub-expression (header included)
+    result_mork = _pure_eval_formula(formula_buf, formula_start)
+    result_mork === nothing && return
+
+    # Substitute: walk template bytes, replace first VarRef/NewVar with result_mork
+    tpl_end = _expr_end_offset(tpl_buf, tpl_start)
+    out = _pure_substitute_first_var(tpl_buf, tpl_start, tpl_end - 1, result_mork)
+    out === nothing && return
+
+    old = get_val_at(btm, out)
+    set_val_at!(btm, out, UNIT_VAL)
+    old === nothing && (s.changed = true)
+end
+
+"""
+    _pure_substitute_first_var(buf, from, to, replacement) → Vector{UInt8}
+
+Walk the expression in buf[from:to], replacing the first VarRef or NewVar
+with `replacement` bytes. Returns the resulting byte vector, or `nothing`
+if no variable slot was found.
+"""
+function _pure_substitute_first_var(buf::Vector{UInt8}, from::Int, to::Int,
+                                     replacement::Vector{UInt8}) :: Union{Vector{UInt8}, Nothing}
+    out = UInt8[]
+    found = Ref(false)
+    _pure_copy_subst!(buf, from, to, replacement, out, found)
+    found[] ? out : nothing
+end
+
+function _pure_copy_subst!(buf::Vector{UInt8}, from::Int, to::Int,
+                            repl::Vector{UInt8}, out::Vector{UInt8}, found::Ref{Bool})
+    from > to && return
+    tag = byte_item(buf[from])
+    if (tag isa ExprNewVar || tag isa ExprVarRef) && !found[]
+        append!(out, repl)
+        found[] = true
+        return
+    end
+    if tag isa ExprSymbol
+        n = Int(tag.size)
+        append!(out, buf[from : from + n])
+        return
+    end
+    if tag isa ExprArity
+        push!(out, buf[from])
+        cur = from + 1
+        for _ in 1:Int(tag.arity)
+            cur > to && break
+            child_end = _expr_end_offset(buf, cur) - 1
+            _pure_copy_subst!(buf, cur, child_end, repl, out, found)
+            cur = child_end + 1
+        end
+        return
+    end
+    push!(out, buf[from])
+end
+
+sink_finalize!(s::PureSink, ::PathMap{UnitVal}) = (c = s.changed; s.changed = false; c)
+
 # Float reduction sinks
-struct FloatReductionSink{R} <: AbstractSink
-    expr ::MORK.Expr
-    op   ::Symbol   # :sum, :min, :max, :prod
+# Mirrors FloatReductionSink<Sum/Min/Max/Prod> in sinks.rs.
+# Template format: (fsum (result-tpl) $c $x) where:
+#   arg2 = result template  (e.g. "(sum $c)")
+#   arg3 = key/context var  ($c — groups the reduction)
+#   arg4 = value            ($x — the numeric value, already substituted)
+mutable struct FloatReductionSink{R} <: AbstractSink
+    expr       ::MORK.Expr
+    op         ::Symbol   # :sum, :min, :max, :prod
+    # Groups: (key_bytes → Vector{Float64})
+    by_key     ::Vector{Tuple{Vector{UInt8}, Vector{Float64}}}
 end
 
-FloatReductionSink(e::MORK.Expr, op::Symbol) = FloatReductionSink{op}(e, op)
+FloatReductionSink(e::MORK.Expr, op::Symbol) = FloatReductionSink{op}(e, op, Tuple{Vector{UInt8}, Vector{Float64}}[])
 
-function sink_apply!(s::FloatReductionSink, bindings, path, btm)
-    # TODO: float extraction and reduction
+function sink_apply!(s::FloatReductionSink, bindings, path::Vector{UInt8}, btm)
+    # path = bound expression bytes: (fXXX <tpl> <key> <value>)
+    length(path) < 5 && return
+    args = ExprEnv[]
+    ee_args!(ExprEnv(UInt8(0), UInt8(0), UInt32(0), MORK.Expr(path)), args)
+    length(args) < 4 && return
+
+    # Extract key bytes (arg3) — the group-by variable/value
+    key_start = Int(args[3].offset) + 1
+    key_end   = _expr_end_offset(path, key_start)
+    key_bytes = path[key_start : key_end-1]
+
+    # Extract value bytes (arg4) — should be a Symbol containing a float string
+    val_start = Int(args[4].offset) + 1
+    val_start > length(path) && return
+    vtag = byte_item(path[val_start])
+    vtag isa ExprSymbol || return
+    val_str = String(path[val_start+1 : val_start + Int(vtag.size)])
+    fval = tryparse(Float64, val_str)
+    fval === nothing && return
+
+    # Find or create the entry for this key
+    idx = findfirst(t -> t[1] == key_bytes, s.by_key)
+    if idx === nothing
+        push!(s.by_key, (key_bytes, Float64[]))
+        idx = length(s.by_key)
+    end
+    push!(s.by_key[idx][2], fval)
 end
 
-sink_finalize!(::FloatReductionSink, ::PathMap{UnitVal}) = false
+function sink_finalize!(s::FloatReductionSink, btm::PathMap{UnitVal}) :: Bool
+    isempty(s.by_key) && return false
+    changed = false
+    op = s.op
+
+    # Extract result template (arg2 of the sink expression)
+    args = ExprEnv[]
+    ee_args!(ExprEnv(UInt8(0), UInt8(0), UInt32(0), s.expr), args)
+    length(args) < 2 && return false
+    tpl_start = Int(args[2].offset) + 1
+    tpl_buf   = args[2].base.buf
+    tpl_end   = _expr_end_offset(tpl_buf, tpl_start)
+    tpl_bytes = tpl_buf[tpl_start : tpl_end-1]
+
+    for (key_bytes, values) in s.by_key
+        isempty(values) && continue
+        result = if op === :sum
+            sum(values)
+        elseif op === :min
+            minimum(values)
+        elseif op === :max
+            maximum(values)
+        elseif op === :prod
+            prod(values)
+        else
+            continue
+        end
+
+        # Format result as a MORK symbol
+        result_str  = string(result)
+        result_mork = vcat(item_byte(ExprSymbol(UInt8(length(result_str)))),
+                           Vector{UInt8}(result_str))
+
+        # Substitute result into the template:
+        # If key_bytes is a variable (NewVar/VarRef), substitute result directly.
+        # Otherwise, prepend key_bytes and append result (result stored as key→result).
+        if length(key_bytes) == 1 && (byte_item(key_bytes[1]) isa ExprNewVar ||
+                                       byte_item(key_bytes[1]) isa ExprVarRef)
+            # Free context variable — substitute result into template's first var
+            out = _pure_substitute_first_var(tpl_bytes, 1, length(tpl_bytes), result_mork)
+            out === nothing && continue
+            old = get_val_at(btm, out)
+            set_val_at!(btm, out, UNIT_VAL)
+            old === nothing && (changed = true)
+        else
+            # Bound key — substitute key into template, then append result
+            # Produces: (sum <key_value> <result>)
+            # First sub the key into the template
+            keyed = _pure_substitute_first_var(tpl_bytes, 1, length(tpl_bytes), key_bytes)
+            keyed === nothing && continue
+            # Append result value as next atom
+            out_bytes = vcat(keyed, result_mork)
+            # Adjust the arity of the outermost expression
+            if !isempty(out_bytes) && byte_item(out_bytes[1]) isa ExprArity
+                old_arity = Int(byte_item(out_bytes[1]).arity)
+                out_bytes[1] = item_byte(ExprArity(UInt8(old_arity + 1)))
+            end
+            old = get_val_at(btm, out_bytes)
+            set_val_at!(btm, out_bytes, UNIT_VAL)
+            old === nothing && (changed = true)
+        end
+    end
+    empty!(s.by_key)
+    changed
+end
 
 # =====================================================================
 # ASink — dispatch union
@@ -450,6 +809,12 @@ function asink_new(e::MORK.Expr) :: AbstractSink
         return FloatReductionSink(e, :prod)
     end
 
+    # [4] pure → PureSink
+    if a1 == item_byte(ExprArity(UInt8(4))) && a2 == item_byte(ExprSymbol(UInt8(4))) &&
+       length(buf) >= 6 && buf[3:6] == Vector{UInt8}("pure")
+        return PureSink(e)
+    end
+
     # [3] ACT → ACTSink
     if a1 == item_byte(ExprArity(UInt8(3))) && a2 == item_byte(ExprSymbol(UInt8(3))) &&
        length(buf) >= 5 && buf[3:5] == Vector{UInt8}("ACT")
@@ -475,5 +840,6 @@ export AbstractSink, sink_apply!, sink_finalize!
 export CompatSink, AddSink, RemoveSink, HeadSink
 export CountSink, SumSink, AndSink
 export ACTSink, WASMSink, PureSink, Z3Sink, USink, AUSink, HashSink
+export _pure_eval_formula, _expr_end_offset
 export FloatReductionSink
 export asink_new, asink_compat

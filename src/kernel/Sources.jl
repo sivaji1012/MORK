@@ -78,7 +78,7 @@ end
 source_requests(s::CompatSource) = [ResourceRequest(RREQ_BTM)]
 
 function source_factor(s::CompatSource, btm::PathMap{UnitVal})
-    ReadZipperCore_at_path(btm, UInt8[])
+    read_zipper_at_path(btm, UInt8[])
 end
 
 # ── BTMSource (BTM, with [2] BTM prefix) ─────────────────────────────
@@ -102,10 +102,8 @@ const _BTM_SOURCE_PREFIX = UInt8[
 source_requests(s::BTMSource) = [ResourceRequest(RREQ_BTM)]
 
 function source_factor(s::BTMSource, btm::PathMap{UnitVal})
-    # PrefixZipper over the BTM at the [2] BTM prefix
-    inner = ReadZipperCore_at_path(btm, UInt8[])
-    pz    = PrefixZipper(_BTM_SOURCE_PREFIX, inner)
-    pz
+    inner = read_zipper_at_path(btm, UInt8[])
+    PrefixZipper(_BTM_SOURCE_PREFIX, inner)
 end
 
 # ── ACTSource (memory-mapped ACT file) ───────────────────────────────
@@ -114,7 +112,7 @@ end
     ACTSource
 
 Reads from an ArenaCompactTree memory-mapped file.
-Mirrors `ACTSource` in sources.rs.  NOT YET PORTED — stubs throw.
+Mirrors `ACTSource` in sources.rs.
 """
 struct ACTSource
     expr ::MORK.Expr
@@ -123,8 +121,40 @@ end
 
 source_requests(s::ACTSource) = [ResourceRequest(RREQ_ACT, s.act)]
 
+# 2-arg fallback (no mmaps cache) — opens the file fresh every call
 source_factor(s::ACTSource, btm::PathMap{UnitVal}) =
-    error("ACTSource not yet ported")
+    source_factor(s, btm, Dict{String,ArenaCompactTree}())
+
+"""
+    source_factor(s::ACTSource, btm, mmaps) → PrefixZipper{ACTZipper}
+
+Open (or reuse from cache) the `.act` file named `s.act` and return a
+PrefixZipper wrapping its read zipper.  Mirrors `ACTSource::source` in sources.rs.
+
+ACT_PATH constant mirrors the upstream `const ACT_PATH` (default ".").
+"""
+const ACT_PATH = Ref{String}(".")
+
+function source_factor(s::ACTSource, btm::PathMap{UnitVal}, mmaps::Dict{String,ArenaCompactTree})
+    # Build prefix: [3] ACT <symbol_size_byte> <name_bytes>
+    # Mirrors CONSTANT_PREFIX + name encoding in ACTSource::source.
+    name   = s.act
+    prefix = UInt8[
+        item_byte(ExprArity(UInt8(3))),
+        item_byte(ExprSymbol(UInt8(3))),
+        UInt8('A'), UInt8('C'), UInt8('T'),
+        item_byte(ExprSymbol(UInt8(length(name)))),
+    ]
+    append!(prefix, codeunits(name))
+
+    # Open or reuse ACT file
+    tree = get!(mmaps, name) do
+        path = joinpath(ACT_PATH[], name * ".act")
+        act_open_mmap(path)
+    end
+    rz = ACTZipper(tree)
+    PrefixZipper(prefix, rz)
+end
 
 # ── CmpSource (equality / inequality comparison) ──────────────────────
 
@@ -141,8 +171,40 @@ end
 
 source_requests(s::CmpSource) = [ResourceRequest(RREQ_BTM)]
 
-source_factor(s::CmpSource, btm::PathMap{UnitVal}) =
-    error("CmpSource not yet ported")
+# Mirrors CmpSource::source in sources.rs.
+# Returns PrefixZipper(EQ/NE_PREFIX, DependentZipper(btm_rz, policy))
+# The DependentZipper extends the BTM read zipper's path with the secondary,
+# so origin_path = [3]== + (primary_path)(secondary_path).
+function source_factor(s::CmpSource, btm::PathMap{UnitVal})
+    cmp      = s.cmp
+    map_clone = deepcopy(btm)   # for != : need full BTM copy to subtract from
+
+    # Policy: (payload, path, c) → (payload, Union{nothing, ReadZipperCore})
+    # Mirrors CmpSource::policy in sources.rs
+    function cmp_policy(payload, path::Vector{UInt8}, c::Int)
+        if c == 0
+            if cmp == 0  # ==: secondary = single-entry PathMap at this path
+                single = PathMap{UnitVal}()
+                set_val_at!(single, path, UNIT_VAL)
+                return (payload, read_zipper(single))
+            else          # !=: secondary = BTM clone minus this path
+                complement = deepcopy(map_clone)
+                remove_val_at!(complement, path)
+                return (payload, read_zipper(complement))
+            end
+        else
+            return (payload, nothing)
+        end
+    end
+
+    primary_rz = read_zipper_at_path(btm, UInt8[])
+    dpz        = DependentZipper(primary_rz, nothing, cmp_policy)
+    prefix     = cmp == 0 ? _EQ_PREFIX : _NE_PREFIX
+    PrefixZipper(prefix, dpz)
+end
+
+const _EQ_PREFIX = UInt8[item_byte(ExprArity(UInt8(3))), item_byte(ExprSymbol(UInt8(2))), UInt8('='), UInt8('=')]
+const _NE_PREFIX = UInt8[item_byte(ExprArity(UInt8(3))), item_byte(ExprSymbol(UInt8(2))), UInt8('!'), UInt8('=')]
 
 # ── ASource — dispatch wrapper ────────────────────────────────────────
 

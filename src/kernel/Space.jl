@@ -81,13 +81,14 @@ mutable struct Space
     btm    ::PathMap{UnitVal, GlobalAlloc}
     sm     ::SharedMappingHandle
     timing ::Bool
+    mmaps  ::Dict{String, ArenaCompactTree}   # ACT file cache (mirrors mmaps in Space)
 end
 
 """    new_space() → Space
 
 Create an empty Space.  Mirrors `Space::new`.
 """
-new_space() = Space(PathMap{UnitVal}(), SharedMappingHandle(), false)
+new_space() = Space(PathMap{UnitVal}(), SharedMappingHandle(), false, Dict{String,ArenaCompactTree}())
 
 """    space_val_count(s) → Int
 
@@ -290,7 +291,7 @@ eliminate per-failed-unify allocations while preserving this contract.)
 Mirrors `Space::query_multi` in space.rs.
 """
 function space_query_multi(btm::PathMap{UnitVal}, pat_expr::MORK.Expr,
-                            effect::Function) :: Int
+                            pat_v::UInt8, effect::Function) :: Int
     pat_tag = byte_item(pat_expr.buf[1])
     pat_tag isa ExprArity || error("pat_expr must be an Arity node")
     n_factors = Int(pat_tag.arity)
@@ -301,25 +302,137 @@ function space_query_multi(btm::PathMap{UnitVal}, pat_expr::MORK.Expr,
         return 1
     end
 
-    # Scratch Dict allocated once per query; reused across unify attempts.
-    # On match: copied to a fresh Dict before calling effect (Option A).
     _bindings_scratch = Dict{ExprVar, ExprEnv}()
     _pairs_scratch    = Tuple{ExprEnv, ExprEnv}[]
 
-    _space_query_multi_inner!(btm, pat_expr, n_factors, effect,
+    _space_query_multi_inner!(btm, pat_expr, pat_v, n_factors, effect,
                                _bindings_scratch, _pairs_scratch)
 end
+
+# Compat wrapper with pat_v=0
+space_query_multi(btm::PathMap{UnitVal}, pat_expr::MORK.Expr, effect::Function) =
+    space_query_multi(btm, pat_expr, UInt8(0), effect)
+
+# =====================================================================
+# space_query_multi_i — I-pattern query using ASource dispatch
+# Mirrors Space::query_multi_i (no_source=false path) in space.rs.
+#
+# For each argument of the I-pattern, calls asource_new() to dispatch:
+#   CompatSource / BTMSource → plain read zipper (same as comma pattern)
+#   CmpSource (== / !=)      → PrefixZipper<DependentZipper> via source_factor
+#
+# All factors are combined in a ProductZipperG, then iterated like
+# query_multi_raw: focus must be on the last factor before yielding.
+# origin_path (including any prefix from CmpSource) is used as the
+# expression for unification, with factor_paths adjusted by prefix length.
+# =====================================================================
+
+function space_query_multi_i(btm::PathMap{UnitVal}, pat_expr::MORK.Expr,
+                               pat_v::UInt8, effect::Function;
+                               mmaps::Dict{String,ArenaCompactTree}=Dict{String,ArenaCompactTree}()) :: Int
+    pat_tag = byte_item(pat_expr.buf[1])
+    pat_tag isa ExprArity || return 0
+    n_factors = Int(pat_tag.arity)
+    n_factors > 0 || return 0
+
+    if n_factors == 1
+        effect(Dict{ExprVar,ExprEnv}(), pat_expr.buf)
+        return 1
+    end
+
+    pat_args = ExprEnv[]
+    ee_args!(ExprEnv(UInt8(0), pat_v, UInt32(0), pat_expr), pat_args)
+    sources = pat_args[2:end]   # ExprEnv for each sub-pattern
+
+    # Build factors: one per sub-pattern via asource_new
+    factors = Any[]
+    for ee in sources
+        span = expr_span(ee.base, Int(ee.offset) + 1)
+        sub  = MORK.Expr(Vector{UInt8}(span))
+        src  = asource_new(sub)
+        # ACTSource uses mmaps cache; all others ignore it
+        factor = src isa ACTSource ? source_factor(src, btm, mmaps) : source_factor(src, btm)
+        push!(factors, factor)
+    end
+
+    # primary = factors[1], secondaries = factors[2:end]
+    primary    = popfirst!(factors)
+    prz        = ProductZipperG(primary, factors)
+    prefix_len = pzg_root_prefix_len(prz)
+
+    candidate        = 0
+    bindings_scratch = Dict{ExprVar, ExprEnv}()
+    pairs_scratch    = Tuple{ExprEnv, ExprEnv}[]
+
+    while pzg_to_next_val!(prz)
+        # Only yield when focus is on the last factor (mirrors query_multi_raw)
+        pzg_focus_factor(prz) != pzg_factor_count(prz) - 1 && continue
+
+        # Build expression from origin_path (includes prefix for CmpSource)
+        combined = collect(pzg_origin_path(prz))
+
+        # factor_paths are into path(); offset by prefix_len for origin_path
+        fps        = pzg_factor_paths(prz)
+        boundaries = vcat(0, [fp + prefix_len for fp in fps], length(combined))
+
+        empty!(pairs_scratch)
+        all_sliced = true
+        for (k, src) in enumerate(sources)
+            lo = boundaries[k] + 1
+            hi = boundaries[k + 1]
+            if lo > hi || lo > length(combined)
+                all_sliced = false; break
+            end
+            expr = MORK.Expr(combined[lo:hi])
+            push!(pairs_scratch, (src, ExprEnv(UInt8(k), UInt8(0), UInt32(0), expr)))
+        end
+        all_sliced || continue
+        length(pairs_scratch) < length(sources) && continue
+
+        # Guard: skip incomplete-secondary yields (DependentZipper primary at leaf
+        # before secondary fully traversed). Mirrors upstream which reads past end
+        # of incomplete paths — we need explicit bounds safety in Julia.
+        pzg_child_count(prz) != 0 && (empty!(bindings_scratch); continue)
+
+        result = try
+            _expr_unify_inplace!(pairs_scratch, bindings_scratch)
+        catch
+            nothing  # malformed/incomplete expression bytes — skip
+        end
+        if result === true
+            candidate += 1
+            bindings_out = copy(bindings_scratch)
+            empty!(bindings_scratch)
+            if !effect(bindings_out, combined)
+                break
+            end
+        else
+            empty!(bindings_scratch)
+        end
+    end
+
+    candidate
+end
+
+space_query_multi_i(btm::PathMap{UnitVal}, pat_expr::MORK.Expr, effect::Function) =
+    space_query_multi_i(btm, pat_expr, UInt8(0), effect)
 
 # Internal hot path — takes pre-allocated scratch buffers so the
 # per-unify-attempt Dict allocation is eliminated.
 function _space_query_multi_inner!(btm::PathMap{UnitVal},
                                     pat_expr::MORK.Expr,
+                                    pat_v::UInt8,
                                     n_factors::Int,
                                     effect::Function,
                                     bindings_scratch::Dict{ExprVar, ExprEnv},
                                     pairs_scratch::Vector{Tuple{ExprEnv, ExprEnv}}) :: Int
+    # Rule of 64: warn if pattern exceeds practical source limit.
+    # ProductZipper with N>2 factors iterates N^M paths (M=trie depth) and
+    # becomes intractable beyond 2 secondary factors in practice.
+    n_factors > 4 && @warn "query_multi: $(n_factors) sources (>4) may be slow — Rule of 64 boundary"
+
     pat_args = ExprEnv[]
-    ee0 = ExprEnv(UInt8(0), UInt8(0), UInt32(0), pat_expr)
+    ee0 = ExprEnv(UInt8(0), pat_v, UInt32(0), pat_expr)
     ee_args!(ee0, pat_args)
     sources = pat_args[2:end]
 
@@ -356,6 +469,12 @@ function _space_query_multi_inner!(btm::PathMap{UnitVal},
                       (src, ExprEnv(UInt8(k), UInt8(0), UInt32(0), expr)))
             end
 
+            # Skip spurious enrollment-only yields (secondary path is empty)
+            if length(pairs_scratch) < length(sources)
+                empty!(bindings_scratch)
+                continue
+            end
+
             # Unify into scratch Dict (zero alloc on failure)
             result = _expr_unify_inplace!(pairs_scratch, bindings_scratch)
             if result === true
@@ -381,6 +500,12 @@ end
 space_query_multi(s::Space, pat::MORK.Expr, f::Function) =
     space_query_multi(s.btm, pat, f)
 
+# Space-level overloads that pass mmaps for ACT file caching
+space_query_multi_i(s::Space, pat::MORK.Expr, f::Function) =
+    space_query_multi_i(s.btm, pat, UInt8(0), f; mmaps=s.mmaps)
+space_query_multi_i(s::Space, pat::MORK.Expr, pat_v::UInt8, f::Function) =
+    space_query_multi_i(s.btm, pat, pat_v, f; mmaps=s.mmaps)
+
 # =====================================================================
 # space_transform_multi_multi! — rewrite rule application
 # =====================================================================
@@ -397,44 +522,124 @@ instead of `apply_e`.
 Returns `(touched, any_new)` where `touched` is match count and `any_new`
 indicates whether at least one new expression was added.
 """
-function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr,
-                                       tpl_expr::MORK.Expr,
-                                       add_expr::MORK.Expr) :: Tuple{Int, Bool}
-    # Decompose tpl_expr into its template children
-    tpl_args = ExprEnv[]
-    ee_tpl = ExprEnv(UInt8(0), UInt8(0), UInt32(0), tpl_expr)
-    ee_args!(ee_tpl, tpl_args)
-    templates = [ee.base.buf[Int(ee.offset)+1 : end] for ee in tpl_args[2:end]]
+# Returns true if the O-template raw bytes indicate an accumulating sink.
+# Accumulating sinks must be created ONCE before the query and finalized ONCE after.
+# Recognized: count, fsum, fmin, fmax, fprod
+function _is_accumulating_sink(raw_bytes::Vector{UInt8}) :: Bool
+    length(raw_bytes) < 4 && return false
+    t1 = byte_item(raw_bytes[1])
+    t1 isa ExprArity || return false
+    t2 = byte_item(raw_bytes[2])
+    t2 isa ExprSymbol || return false
+    sz = Int(t2.size)
+    3 + sz > length(raw_bytes) && return false
+    name = String(raw_bytes[3 : 3+sz-1])
+    name in ("count", "fsum", "fmin", "fmax", "fprod") && return true
+    false
+end
 
-    # In upstream Rust: add_expr is inserted into read_copy (a clone of btm used
-    # for querying only), NOT into btm itself. Writing it to btm would re-trigger
-    # metta_calculus on the next step, creating an infinite firing loop.
-    # Our simplified version skips the clone step and queries s.btm directly,
-    # so we must NOT re-insert add_expr. The exec rule is already consumed
-    # (removed) by space_metta_calculus! before interpret is called.
-    # Uncommenting the line below would reproduce the infinite-loop bug:
-    # set_val_at!(s.btm, collect(add_expr.buf), UNIT_VAL)
+# Mirrors transform_multi_multi_io(pat_expr, tpl_expr, add, no_source, no_sink)
+# no_source=true  → pattern is `,`  (query the trie — compat path)
+# no_source=false → pattern is `I`  (external ACT/Z3 source via query_multi_i;
+#                                    not ported — requires mmaps/z3s infrastructure.
+#                                    Falls back to trie query for now.)
+# no_sink=true    → template is `,` (direct set_val_at!)
+# no_sink=false   → template is `O` (dispatch through sink machinery)
+function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt8,
+                                       tpl_expr::MORK.Expr, tpl_v::UInt8,
+                                       add_expr::MORK.Expr;
+                                       no_source::Bool=true,
+                                       no_sink::Bool=true) :: Tuple{Int, Bool}
+    tpl_args = ExprEnv[]
+    ee_tpl = ExprEnv(UInt8(0), tpl_v, UInt32(0), tpl_expr)
+    ee_args!(ee_tpl, tpl_args)
+    template_ees = tpl_args[2:end]
 
     any_new  = Ref(false)
-    touched  = space_query_multi(s.btm, pat_expr, (bindings, loc_expr) -> begin
-        for tpl_bytes in templates
-            # Apply bindings to template
-            tpl_e = MORK.Expr(Vector{UInt8}(tpl_bytes))
-            out_buf = Vector{UInt8}(undef, max(length(tpl_bytes) * 4, 64))
-            ez  = ExprZipper(tpl_e, 1)
-            oz  = ExprZipper(MORK.Expr(out_buf), 1)
-            expr_apply(UInt8(0), UInt8(0), UInt8(0), ez, bindings, oz,
-                       Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
-            result_bytes = oz.root.buf[1:oz.loc-1]
-            old = get_val_at(s.btm, result_bytes)
-            set_val_at!(s.btm, result_bytes, UNIT_VAL)
-            old === nothing && (any_new[] = true)
+
+    # Pre-create persistent (accumulating) sinks for O-templates.
+    # CountSink accumulates sources across all matches before finalizing once.
+    # Other sinks are created fresh per match (persistent_sinks[k] = nothing).
+    persistent_sinks = if no_sink
+        nothing
+    else
+        map(template_ees) do ee
+            tpl_span = expr_span(ee.base, Int(ee.offset) + 1)
+            raw_bytes = Vector{UInt8}(tpl_span)
+            _is_accumulating_sink(raw_bytes) ? asink_new(MORK.Expr(raw_bytes)) : nothing
+        end
+    end
+
+    # Build read_btm: clone s.btm and re-insert the exec atom (add_expr).
+    # Mirrors upstream: `let mut read_copy = self.btm.clone(); read_copy.insert(add.span(), ())`.
+    # This enables self-referential exec rules — the exec atom was removed from s.btm
+    # before interpret was called, but re-inserting it here lets pattern (, (exec ...))
+    # match the atom that triggered the current transform.
+    read_btm = deepcopy(s.btm)
+    set_val_at!(read_btm, add_expr.buf, UNIT_VAL)
+
+    # space_query_multi_i uses s.mmaps for ACT file caching (I-pattern)
+    query_fn = no_source ? space_query_multi :
+                           (btm, pat, v, f) -> space_query_multi_i(btm, pat, v, f; mmaps=s.mmaps)
+    touched  = query_fn(read_btm, pat_expr, pat_v, (bindings, loc_expr) -> begin
+        if no_sink
+            # `,` template functor — apply each template and insert result directly
+            for ee in template_ees
+                tpl_span = expr_span(ee.base, Int(ee.offset) + 1)
+                tpl_e = MORK.Expr(Vector{UInt8}(tpl_span))
+                out_buf = Vector{UInt8}(undef, max(length(tpl_span) * 4, 64))
+                ez = ExprZipper(tpl_e, 1)
+                oz = ExprZipper(MORK.Expr(out_buf), 1)
+                expr_apply(UInt8(0), ee.v, UInt8(0), ez, bindings, oz,
+                           Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
+                result_bytes = oz.root.buf[1:oz.loc-1]
+                old = get_val_at(s.btm, result_bytes)
+                set_val_at!(s.btm, result_bytes, UNIT_VAL)
+                old === nothing && (any_new[] = true)
+            end
+        else
+            # `O` template functor — apply each template then dispatch to sink.
+            # Accumulating sinks (CountSink) use persistent_sinks created before query.
+            for (k, ee) in enumerate(template_ees)
+                tpl_span = expr_span(ee.base, Int(ee.offset) + 1)
+                tpl_e = MORK.Expr(Vector{UInt8}(tpl_span))
+                out_buf = Vector{UInt8}(undef, max(length(tpl_span) * 4, 64))
+                ez = ExprZipper(tpl_e, 1)
+                oz = ExprZipper(MORK.Expr(out_buf), 1)
+                expr_apply(UInt8(0), ee.v, UInt8(0), ez, bindings, oz,
+                           Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
+                result_expr = MORK.Expr(oz.root.buf[1:oz.loc-1])
+                if persistent_sinks[k] !== nothing
+                    # Accumulating sink: apply but don't finalize yet
+                    sink_apply!(persistent_sinks[k], bindings, result_expr.buf, s.btm)
+                else
+                    # Immediate sink: create fresh, apply, finalize
+                    sink = asink_new(result_expr)
+                    sink_apply!(sink, bindings, result_expr.buf, s.btm)
+                    changed = sink_finalize!(sink, s.btm)
+                    changed && (any_new[] = true)
+                end
+            end
         end
         true
     end)
 
+    # Finalize accumulating sinks (CountSink etc.) once after all matches
+    if !no_sink
+        for sink in persistent_sinks
+            sink === nothing && continue
+            changed = sink_finalize!(sink, s.btm)
+            changed && (any_new[] = true)
+        end
+    end
+
     (touched, any_new[])
 end
+
+# Compat wrapper for callers without v parameters (v defaults to 0)
+space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, tpl_expr::MORK.Expr,
+                              add_expr::MORK.Expr) =
+    space_transform_multi_multi!(s, pat_expr, UInt8(0), tpl_expr, UInt8(0), add_expr)
 
 # =====================================================================
 # space_interpret! / space_metta_calculus! — rule evaluation engine
@@ -495,7 +700,24 @@ function space_interpret!(s::Space, rt::MORK.Expr) :: Bool
     pat_expr = MORK.Expr(pat_buf[pat_off+1 : end])
     tpl_expr = MORK.Expr(tpl_buf[tpl_off+1 : end])
 
-    space_transform_multi_multi!(s, pat_expr, tpl_expr, rt)
+    # Read functor byte: pat[offset+3] is the single-char functor (`,` or `I`)
+    # tpl[offset+3] is the single-char functor (`,` or `O`)
+    # Mirrors upstream: match (*pat_expr.ptr.add(2), *tpl_expr.ptr.add(2))
+    pat_functor = pat_buf[pat_off + 3]
+    tpl_functor = tpl_buf[tpl_off + 3]
+
+    no_source = (pat_functor == UInt8(','))
+    no_sink   = (tpl_functor == UInt8(','))
+
+    if !no_source && pat_functor != UInt8('I')
+        return false  # invalid pattern functor
+    end
+    if !no_sink && tpl_functor != UInt8('O')
+        return false  # invalid template functor
+    end
+
+    space_transform_multi_multi!(s, pat_expr, pat_ee.v, tpl_expr, tpl_ee.v, rt;
+                                  no_source=no_source, no_sink=no_sink)
     true
 end
 
@@ -509,12 +731,10 @@ Mirrors `Space::metta_calculus` in space.rs.
 function space_metta_calculus!(s::Space, steps::Int=typemax(Int)) :: Int
     done = 0
     while done < steps
-        # Find next exec expression using the fixed prefix
         rz = read_zipper_at_path(s.btm, _EXEC_PREFIX)
         found = zipper_to_next_val!(rz)
         !found && break
 
-        # Full path = prefix + relative path
         rel_path  = collect(zipper_path(rz))
         full_path = vcat(_EXEC_PREFIX, rel_path)
 
@@ -528,6 +748,226 @@ function space_metta_calculus!(s::Space, steps::Int=typemax(Int)) :: Int
 end
 
 # =====================================================================
+# prefix_subsumption — group prefixes by longest shared prefix
+# Mirrors Space::prefix_subsumption in space.rs (line 1278)
+# =====================================================================
+
+function space_prefix_subsumption(prefixes::Vector{Vector{UInt8}}) :: Vector{Int}
+    n   = length(prefixes)
+    out = Vector{Int}(undef, n)
+    for i in 1:n
+        cur      = prefixes[i]
+        best_idx = i
+        best_len = length(cur)
+        for j in 1:n
+            cand = prefixes[j]
+            # cand is a prefix of cur iff cand == cur[1:length(cand)]
+            cl = length(cand)
+            if cl <= length(cur) && cur[1:cl] == cand
+                if cl < best_len || (cl == best_len && j < best_idx)
+                    best_idx = j
+                    best_len = cl
+                end
+            end
+        end
+        out[i] = best_idx
+    end
+    out
+end
+
+# =====================================================================
+# space_token_bfs — BFS from token prefix, return unifiable matches
+# Mirrors Space::token_bfs in space.rs (line 1750)
+# =====================================================================
+
+function space_token_bfs(s::Space, token::Vector{UInt8}, pattern::MORK.Expr) :: Vector{Tuple{Vector{UInt8}, MORK.Expr}}
+    rz  = read_zipper_at_path(s.btm, token)
+    zipper_descend_until!(rz)
+    res = Tuple{Vector{UInt8}, MORK.Expr}[]
+    cm  = zipper_child_mask(rz)
+    for b in cm
+        zipper_descend_to_byte!(rz, b)
+        # Get representative expression for this byte position:
+        # - If already at a value (single-byte key is a leaf value), use current position.
+        # - Otherwise advance rzc to the first value in the subtrie via to_next_val!.
+        # NOTE: iter_token_for_path starts AFTER the current key, so zipper_to_next_val!
+        # on a value position would skip it and return the wrong expression.
+        origin = if zipper_is_val(rz)
+            copy(rz.prefix_buf)
+        else
+            rzc = deepcopy(rz)
+            zipper_to_next_val!(rzc) || (zipper_ascend_byte!(rz); continue)
+            copy(rzc.prefix_buf)
+        end
+        e = MORK.Expr(origin)
+        # expr_unifiable: attempt unification, return true if succeeds
+        pairs = Tuple{ExprEnv,ExprEnv}[
+            (ExprEnv(UInt8(0), UInt8(0), UInt32(0), e),
+             ExprEnv(UInt8(1), UInt8(0), UInt32(0), pattern))
+        ]
+        scratch = Dict{ExprVar,ExprEnv}()
+        if _expr_unify_inplace!(pairs, scratch) === true
+            push!(res, (copy(rz.prefix_buf[1:rz.origin_path_len + length(zipper_path(rz))]), e))
+        end
+        zipper_ascend_byte!(rz)
+    end
+    res
+end
+
+# =====================================================================
+# space_load_csv! — load CSV rows as expressions via pattern/template
+# Mirrors Space::load_csv in space.rs (line 509)
+# =====================================================================
+
+function space_load_csv!(s::Space, src, pattern::MORK.Expr, template::MORK.Expr,
+                          separator::UInt8=UInt8(',')) :: Int
+    bytes = src isa Vector{UInt8} ? src : Vector{UInt8}(src)
+    count = 0
+    for (i, line) in enumerate(split(String(bytes), '\n'))
+        isempty(line) && continue
+        fields = split(line, Char(separator))
+        # Build expr: (arity+1 row_index field1 field2 ...)
+        # row_index = i-1 as decimal string symbol, matching Rust i.to_string()
+        row_sym  = string(i - 1)
+        parts    = vcat([row_sym], String.(fields))
+        arity    = length(parts)
+        buf      = UInt8[]
+        push!(buf, item_byte(ExprArity(UInt8(arity))))
+        for p in parts
+            pb = Vector{UInt8}(p)
+            push!(buf, item_byte(ExprSymbol(UInt8(length(pb)))))
+            append!(buf, pb)
+        end
+        data_expr = MORK.Expr(buf)
+
+        # Unify with pattern, apply template
+        bindings = Dict{ExprVar,ExprEnv}()
+        pairs    = Tuple{ExprEnv,ExprEnv}[
+            (ExprEnv(UInt8(0), UInt8(0), UInt32(0), pattern),
+             ExprEnv(UInt8(1), UInt8(0), UInt32(0), data_expr))
+        ]
+        _expr_unify_inplace!(pairs, bindings) === true || continue
+
+        out_buf = Vector{UInt8}(undef, max(length(template.buf) * 4, 256))
+        ez_tpl  = ExprZipper(template, 1)
+        oz      = ExprZipper(MORK.Expr(out_buf), 1)
+        expr_apply(UInt8(0), UInt8(0), UInt8(0), ez_tpl, bindings, oz,
+                   Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
+        set_val_at!(s.btm, oz.root.buf[1:oz.loc-1], UNIT_VAL)
+        count += 1
+    end
+    count
+end
+
+# =====================================================================
+# space_add_sexpr! / space_remove_sexpr! — pattern+template variants
+# Mirrors Space::add_sexpr / remove_sexpr / load_sexpr_impl in space.rs
+# =====================================================================
+
+function space_add_sexpr!(s::Space, src, pattern::MORK.Expr, template::MORK.Expr) :: Int
+    _space_load_sexpr_impl!(s, src, pattern, template, true)
+end
+
+function space_remove_sexpr!(s::Space, src, pattern::MORK.Expr, template::MORK.Expr) :: Int
+    _space_load_sexpr_impl!(s, src, pattern, template, false)
+end
+
+function _space_load_sexpr_impl!(s::Space, src, pattern::MORK.Expr, template::MORK.Expr, add::Bool) :: Int
+    bytes  = src isa Vector{UInt8} ? src : Vector{UInt8}(src)
+    ctx    = SexprContext(bytes)
+    parser = SpaceParser()
+    count  = 0
+    while true
+        buf = Vector{UInt8}(undef, max(length(bytes) * 2, 64))
+        z   = ExprZipper(MORK.Expr(buf), 1)
+        try
+            sexpr_parse!(parser, ctx, z)
+        catch e
+            e isa SexprException && e.err == SERR_INPUT_FINISHED && break
+            rethrow()
+        end
+        data_expr = MORK.Expr(z.root.buf[1:z.loc-1])
+        empty!(ctx.variables)
+
+        # Unify data_expr with pattern, apply template
+        bindings = Dict{ExprVar,ExprEnv}()
+        pairs    = Tuple{ExprEnv,ExprEnv}[
+            (ExprEnv(UInt8(0), UInt8(0), UInt32(0), pattern),
+             ExprEnv(UInt8(1), UInt8(0), UInt32(0), data_expr))
+        ]
+        _expr_unify_inplace!(pairs, bindings) === true || continue
+
+        out_buf = Vector{UInt8}(undef, max(length(template.buf) * 4, 256))
+        ez_tpl  = ExprZipper(template, 1)
+        oz      = ExprZipper(MORK.Expr(out_buf), 1)
+        expr_apply(UInt8(0), UInt8(0), UInt8(0), ez_tpl, bindings, oz,
+                   Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
+        result_bytes = oz.root.buf[1:oz.loc-1]
+        if add; set_val_at!(s.btm, result_bytes, UNIT_VAL)
+        else;    remove_val_at!(s.btm, result_bytes); end
+        count += 1
+    end
+    count
+end
+
+# =====================================================================
+# space_dump_sexpr — dump matching expressions via pattern/template
+# Mirrors Space::dump_sexpr in space.rs
+# =====================================================================
+
+function space_dump_sexpr(s::Space, pattern::MORK.Expr, template::MORK.Expr, io::IO) :: Int
+    # Wrap pattern in comma functor: (, pattern) so query_multi can process it
+    pat_wrap_buf = vcat(
+        item_byte(ExprArity(UInt8(2))),
+        item_byte(ExprSymbol(UInt8(1))), UInt8(','),
+        pattern.buf
+    )
+    pat_wrapped = MORK.Expr(pat_wrap_buf)
+
+    count = Ref(0)
+    space_query_multi(s.btm, pat_wrapped, UInt8(0), (bindings, _loc_buf) -> begin
+        out_buf = Vector{UInt8}(undef, max(length(template.buf) * 4, 256))
+        ez_tpl  = ExprZipper(template, 1)
+        oz      = ExprZipper(MORK.Expr(out_buf), 1)
+        expr_apply(UInt8(0), UInt8(0), UInt8(0), ez_tpl, bindings, oz,
+                   Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
+        result_bytes = oz.root.buf[1:oz.loc-1]
+        println(io, expr_serialize(result_bytes))
+        count[] += 1
+        true
+    end)
+    count[]
+end
+
+space_dump_sexpr(s::Space, pattern::MORK.Expr, template::MORK.Expr) =
+    space_dump_sexpr(s, pattern, template, stdout)
+
+# =====================================================================
+# Persistence — backup/restore tree and paths
+# Mirrors Space::backup_tree/restore_tree/backup_paths/restore_paths
+# backup_symbols/restore_symbols are no-ops (no interning in this port)
+# =====================================================================
+
+function space_backup_tree(s::Space, path::AbstractString)
+    open(path, "w") do io; serialize_paths(s.btm, io); end
+end
+
+function space_restore_tree!(s::Space, path::AbstractString)
+    open(path, "r") do io; deserialize_paths(s.btm, io, UNIT_VAL); end
+end
+
+function space_backup_paths(s::Space, path::AbstractString)
+    open(path, "w") do io; serialize_paths(s.btm, io); end
+end
+
+function space_restore_paths!(s::Space, path::AbstractString)
+    open(path, "r") do io; deserialize_paths(s.btm, io, UNIT_VAL); end
+end
+
+space_backup_symbols(::Space, ::AbstractString)  = nothing  # no interning in this port
+space_restore_symbols!(::Space, ::AbstractString) = nothing
+
+# =====================================================================
 # Exports
 # =====================================================================
 
@@ -535,7 +975,129 @@ export SPACE_SIZES, SPACE_ARITIES, SPACE_VARS
 export SpaceParser
 export Space, new_space, space_val_count, space_statistics
 export space_add_all_sexpr!, space_remove_all_sexpr!
-export space_dump_all_sexpr, space_load_json!
-export BreakQuery, space_query_multi, _space_query_multi_inner!
+export space_add_sexpr!, space_remove_sexpr!
+export space_dump_all_sexpr, space_dump_sexpr, space_load_json!
+export space_backup_tree, space_restore_tree!
+export space_backup_paths, space_restore_paths!
+# =====================================================================
+# space_sexpr_to_expr — server-branch addition
+# Mirrors sexpr_to_path / Space::sexpr_to_expr in space_temporary.rs
+# =====================================================================
+
+function space_sexpr_to_expr(s::Space, sexpr::AbstractString) :: MORK.Expr
+    sexpr_to_expr(sexpr)
+end
+
+# =====================================================================
+# space_metta_calculus_at! — server-branch addition
+# Mirrors Space::metta_calculus(thread_id_sexpr_str, ...) in space_temporary.rs
+# Runs metta_calculus consuming only (exec (<location> $priority) ...) atoms.
+# =====================================================================
+
+function space_metta_calculus_at!(s::Space, location_sexpr::AbstractString,
+                                   max_steps::Int=typemax(Int)) :: Int
+    # Build the exec prefix for this location: (exec (<location> $) $ $)
+    # Mirrors metta_calculus_impl: prefix_e = format!("(exec ({} $) $ $)", thread_id)
+    # CRITICAL: use only the CONSTANT prefix (bytes up to first NewVar) so the
+    # read_zipper navigates to the right subtrie. Full buf includes variable bytes
+    # (0xC0 NewVar) which don't exist in the stored paths.
+    prefix_str = "(exec ($location_sexpr \$) \$ \$)"
+    try
+        prefix_expr  = sexpr_to_expr(prefix_str)
+        prefix_bytes = _derive_prefix(prefix_expr)   # constant prefix only
+
+        done = 0
+        while done < max_steps
+            rz    = read_zipper_at_path(s.btm, prefix_bytes)
+            found = zipper_to_next_val!(rz)
+            !found && break
+
+            rel_path  = collect(zipper_path(rz))
+            full_path = vcat(prefix_bytes, rel_path)
+            remove_val_at!(s.btm, full_path)
+            rt = MORK.Expr(full_path)
+            space_interpret!(s, rt)
+            done += 1
+        end
+        done
+    catch e
+        @warn "space_metta_calculus_at!: $e"
+        0
+    end
+end
+
+# =====================================================================
+# space_acquire_transform_permissions — server-branch addition
+# Mirrors Space::acquire_transform_permissions in space_temporary.rs.
+# Returns (read_map, template_prefixes, writer_paths) where:
+#   read_map          = PathMap copy of all pattern subtries
+#   template_prefixes = Vector{Tuple{Int,Int}} (incremental_start, writer_idx)
+#   writer_paths      = Vector{Vector{UInt8}} (one path per unique writer slot)
+# =====================================================================
+
+function space_acquire_transform_permissions(s::Space,
+                                              patterns::Vector{MORK.Expr},
+                                              templates::Vector{MORK.Expr})
+    # Compute constant prefix for each expression (longest ground prefix)
+    # Simplified: use empty prefix (matches all) — mirrors till_constant_to_full fallback
+    _prefix(e::MORK.Expr) = UInt8[]
+
+    # Build template prefix table, sorted shortest-first (mirrors sort_by len)
+    tpl_paths = [_prefix(t) for t in templates]
+    sorted_idx = sortperm(tpl_paths; by=length)
+
+    # Find unique writer slots via prefix subsumption
+    writer_slots = Vector{UInt8}[]
+    writer_slot_idx = zeros(Int, length(templates))
+    for i in sorted_idx
+        path = tpl_paths[i]
+        subsumed = false
+        for (slot_idx, slot_path) in enumerate(writer_slots)
+            overlap = 0
+            for j in 1:min(length(path), length(slot_path))
+                path[j] == slot_path[j] ? (overlap = j) : break
+            end
+            if overlap == length(slot_path)
+                writer_slot_idx[i] = slot_idx
+                subsumed = true
+                break
+            end
+        end
+        if !subsumed
+            push!(writer_slots, path)
+            writer_slot_idx[i] = length(writer_slots)
+        end
+    end
+
+    # Build template_prefixes: (incremental_path_start, writer_slot_idx)
+    template_prefixes = [(length(writer_slots[writer_slot_idx[i]]), writer_slot_idx[i])
+                         for i in 1:length(templates)]
+
+    # Build read_map: copy each pattern subtrie
+    read_map = PathMap{UnitVal}()
+    for pat in patterns
+        prefix = _prefix(pat)
+        rz = read_zipper_at_path(s.btm, prefix)
+        wz = write_zipper_at_path(read_map, prefix)
+        while zipper_to_next_val!(rz)
+            set_val_at!(read_map, collect(zipper_path(rz)), UNIT_VAL)
+        end
+    end
+
+    (read_map, template_prefixes, writer_slots)
+end
+
+export space_backup_symbols, space_restore_symbols!
+export space_prefix_subsumption, space_token_bfs, space_load_csv!
+export BreakQuery, space_query_multi, space_query_multi_i, _space_query_multi_inner!
 export space_transform_multi_multi!
 export space_interpret!, space_metta_calculus!
+export space_sexpr_to_expr, space_metta_calculus_at!, space_acquire_transform_permissions
+
+# Precompile hot-path method specializations so JIT fires at package load,
+# not on first user call. Mirrors upstream's statically-compiled hot paths.
+precompile(space_metta_calculus!, (Space, Int))
+precompile(space_interpret!, (Space, MORK.Expr))
+precompile(space_add_all_sexpr!, (Space, String))
+precompile(space_dump_all_sexpr, (Space,))
+precompile(_space_query_multi_inner!, (PathMap{UnitVal}, MORK.Expr, Int, Function, Dict{ExprVar,ExprEnv}, Vector{Tuple{ExprEnv,ExprEnv}}))

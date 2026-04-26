@@ -339,6 +339,334 @@ const PURE_OPS = Dict{String, Function}(
     "i64_to_string"   => (a) -> Vector{UInt8}(string(_read_i64(a[1]))),
     "f32_to_string"   => (a) -> Vector{UInt8}(string(_read_f32(a[1]))),
     "f64_to_string"   => (a) -> Vector{UInt8}(string(_read_f64(a[1]))),
+
+    # ── i8/i16/i32/i64/i128 arithmetic (missing from original port) ──
+    "sub_i8"   => (a) -> _read_i8(a[1])  - _read_i8(a[2]),
+    "sub_i16"  => (a) -> _read_i16(a[1]) - _read_i16(a[2]),
+    "sub_i32"  => (a) -> _read_i32(a[1]) - _read_i32(a[2]),
+    "sub_i64"  => (a) -> _read_i64(a[1]) - _read_i64(a[2]),
+    "div_i8"   => (a) -> div(_read_i8(a[1]),  _read_i8(a[2])),
+    "div_i16"  => (a) -> div(_read_i16(a[1]), _read_i16(a[2])),
+    "div_i32"  => (a) -> div(_read_i32(a[1]), _read_i32(a[2])),
+    "div_i64"  => (a) -> div(_read_i64(a[1]), _read_i64(a[2])),
+    "mod_i8"   => (a) -> rem(_read_i8(a[1]),  _read_i8(a[2])),
+    "mod_i16"  => (a) -> rem(_read_i16(a[1]), _read_i16(a[2])),
+    "mod_i32"  => (a) -> rem(_read_i32(a[1]), _read_i32(a[2])),
+    "mod_i64"  => (a) -> rem(_read_i64(a[1]), _read_i64(a[2])),
+    "pow_i8"   => (a) -> _read_i8(a[1])  ^ Int(_read_i8(a[2])),
+    "pow_i16"  => (a) -> _read_i16(a[1]) ^ Int(_read_i16(a[2])),
+    "pow_i32"  => (a) -> _read_i32(a[1]) ^ Int(_read_i32(a[2])),
+    "pow_i64"  => (a) -> _read_i64(a[1]) ^ Int(_read_i64(a[2])),
+    "neg_i8"   => (a) -> -_read_i8(a[1]),
+    "neg_i16"  => (a) -> -_read_i16(a[1]),
+    "neg_i32"  => (a) -> -_read_i32(a[1]),
+    "neg_i64"  => (a) -> -_read_i64(a[1]),
+    "abs_i8"   => (a) -> abs(_read_i8(a[1])),
+    "abs_i16"  => (a) -> abs(_read_i16(a[1])),
+    "abs_i32"  => (a) -> abs(_read_i32(a[1])),
+    "abs_i64"  => (a) -> abs(_read_i64(a[1])),
+    "signum_i8"  => (a) -> Int8(sign(_read_i8(a[1]))),
+    "signum_i16" => (a) -> Int16(sign(_read_i16(a[1]))),
+    "signum_i32" => (a) -> Int32(sign(_read_i32(a[1]))),
+    "signum_i64" => (a) -> Int64(sign(_read_i64(a[1]))),
+    "min_i8"   => (a) -> min(_read_i8(a[1]),  _read_i8(a[2])),
+    "min_i16"  => (a) -> min(_read_i16(a[1]), _read_i16(a[2])),
+    "min_i32"  => (a) -> min(_read_i32(a[1]), _read_i32(a[2])),
+    "min_i64"  => (a) -> min(_read_i64(a[1]), _read_i64(a[2])),
+    "max_i8"   => (a) -> max(_read_i8(a[1]),  _read_i8(a[2])),
+    "max_i16"  => (a) -> max(_read_i16(a[1]), _read_i16(a[2])),
+    "max_i32"  => (a) -> max(_read_i32(a[1]), _read_i32(a[2])),
+    "max_i64"  => (a) -> max(_read_i64(a[1]), _read_i64(a[2])),
+    "clamp_i8"  => (a) -> clamp(_read_i8(a[1]),  _read_i8(a[2]),  _read_i8(a[3])),
+    "clamp_i16" => (a) -> clamp(_read_i16(a[1]), _read_i16(a[2]), _read_i16(a[3])),
+    "clamp_i32" => (a) -> clamp(_read_i32(a[1]), _read_i32(a[2]), _read_i32(a[3])),
+    "clamp_i64" => (a) -> clamp(_read_i64(a[1]), _read_i64(a[2]), _read_i64(a[3])),
+    "sum_i8"   => (a) -> reduce((x,y) -> x + _read_i8(y),  a[2:end]; init=_read_i8(a[1])),
+    "sum_i16"  => (a) -> reduce((x,y) -> x + _read_i16(y), a[2:end]; init=_read_i16(a[1])),
+    "sum_i32"  => (a) -> reduce((x,y) -> x + _read_i32(y), a[2:end]; init=_read_i32(a[1])),
+    "sum_i64"  => (a) -> reduce((x,y) -> x + _read_i64(y), a[2:end]; init=_read_i64(a[1])),
+    "product_i8"  => (a) -> reduce((x,y) -> x * _read_i8(y),  a[2:end]; init=_read_i8(a[1])),
+    "product_i16" => (a) -> reduce((x,y) -> x * _read_i16(y), a[2:end]; init=_read_i16(a[1])),
+    "product_i32" => (a) -> reduce((x,y) -> x * _read_i32(y), a[2:end]; init=_read_i32(a[1])),
+    "product_i64" => (a) -> reduce((x,y) -> x * _read_i64(y), a[2:end]; init=_read_i64(a[1])),
+    "i8_one"  => (_) -> Int8(1),
+    "i16_one" => (_) -> Int16(1),
+    "i32_one" => (_) -> Int32(1),
+    "i64_one" => (_) -> Int64(1),
+
+    # ── i128 ─────────────────────────────────────────────────────────
+    "abs_i128"     => (a) -> abs(_read_i64(a[1])),
+    "neg_i128"     => (a) -> -_read_i64(a[1]),
+    "signum_i128"  => (a) -> Int64(sign(_read_i64(a[1]))),
+    "min_i128"     => (a) -> min(_read_i64(a[1]), _read_i64(a[2])),
+    "max_i128"     => (a) -> max(_read_i64(a[1]), _read_i64(a[2])),
+    "clamp_i128"   => (a) -> clamp(_read_i64(a[1]), _read_i64(a[2]), _read_i64(a[3])),
+    "sum_i128"     => (a) -> reduce((x,y) -> x + _read_i64(y), a[2:end]; init=_read_i64(a[1])),
+    "product_i128" => (a) -> reduce((x,y) -> x * _read_i64(y), a[2:end]; init=_read_i64(a[1])),
+    "mod_i128"     => (a) -> rem(_read_i64(a[1]), _read_i64(a[2])),
+    "pow_i128"     => (a) -> _read_i64(a[1]) ^ Int(_read_i64(a[2])),
+    "i128_one"     => (_) -> Int64(1),
+    "i128_from_string" => (a) -> parse(Int64, String(a[1])),
+    "i128_to_string"   => (a) -> Vector{UInt8}(string(_read_i64(a[1]))),
+    "sub_i128"         => (a) -> _read_i64(a[1]) - _read_i64(a[2]),
+    "div_i128"         => (a) -> div(_read_i64(a[1]), _read_i64(a[2])),
+    "i128_as_i8"       => (a) -> Int8(_read_i64(a[1])),
+    "i128_as_i16"      => (a) -> Int16(_read_i64(a[1])),
+    "i128_as_i32"      => (a) -> Int32(_read_i64(a[1])),
+    "i128_as_i64"      => (a) -> Int64(_read_i64(a[1])),
+    "i128_as_f32"      => (a) -> Float32(_read_i64(a[1])),
+    "i128_as_f64"      => (a) -> Float64(_read_i64(a[1])),
+
+    # ── type conversions ─────────────────────────────────────────────
+    "i8_as_i16"   => (a) -> Int16(_read_i8(a[1])),
+    "i8_as_i32"   => (a) -> Int32(_read_i8(a[1])),
+    "i8_as_i64"   => (a) -> Int64(_read_i8(a[1])),
+    "i8_as_i128"  => (a) -> Int64(_read_i8(a[1])),
+    "i8_as_f32"   => (a) -> Float32(_read_i8(a[1])),
+    "i8_as_f64"   => (a) -> Float64(_read_i8(a[1])),
+    "i16_as_i8"   => (a) -> Int8(_read_i16(a[1])),
+    "i16_as_i32"  => (a) -> Int32(_read_i16(a[1])),
+    "i16_as_i64"  => (a) -> Int64(_read_i16(a[1])),
+    "i16_as_i128" => (a) -> Int64(_read_i16(a[1])),
+    "i16_as_f32"  => (a) -> Float32(_read_i16(a[1])),
+    "i16_as_f64"  => (a) -> Float64(_read_i16(a[1])),
+    "i32_as_i8"   => (a) -> Int8(_read_i32(a[1])),
+    "i32_as_i16"  => (a) -> Int16(_read_i32(a[1])),
+    "i32_as_i64"  => (a) -> Int64(_read_i32(a[1])),
+    "i32_as_i128" => (a) -> Int64(_read_i32(a[1])),
+    "i32_as_f32"  => (a) -> Float32(_read_i32(a[1])),
+    "i32_as_f64"  => (a) -> Float64(_read_i32(a[1])),
+    "i64_as_i8"   => (a) -> Int8(_read_i64(a[1])),
+    "i64_as_i16"  => (a) -> Int16(_read_i64(a[1])),
+    "i64_as_i32"  => (a) -> Int32(_read_i64(a[1])),
+    "i64_as_i128" => (a) -> Int64(_read_i64(a[1])),
+    "i64_as_f32"  => (a) -> Float32(_read_i64(a[1])),
+    "i64_as_f64"  => (a) -> Float64(_read_i64(a[1])),
+    "f32_as_i8"   => (a) -> Int8(_read_f32(a[1])),
+    "f32_as_i16"  => (a) -> Int16(_read_f32(a[1])),
+    "f32_as_i32"  => (a) -> Int32(_read_f32(a[1])),
+    "f32_as_i64"  => (a) -> Int64(_read_f32(a[1])),
+    "f32_as_i128" => (a) -> Int64(_read_f32(a[1])),
+    "f32_as_f64"  => (a) -> Float64(_read_f32(a[1])),
+    "f64_as_i8"   => (a) -> Int8(_read_f64(a[1])),
+    "f64_as_i16"  => (a) -> Int16(_read_f64(a[1])),
+    "f64_as_i32"  => (a) -> Int32(_read_f64(a[1])),
+    "f64_as_i64"  => (a) -> Int64(_read_f64(a[1])),
+    "f64_as_i128" => (a) -> Int64(_read_f64(a[1])),
+    "f64_as_f32"  => (a) -> Float32(_read_f64(a[1])),
+
+    # ── f32/f64 arithmetic ────────────────────────────────────────────
+    "sub_f32"  => (a) -> _read_f32(a[1]) - _read_f32(a[2]),
+    "sub_f64"  => (a) -> _read_f64(a[1]) - _read_f64(a[2]),
+    "div_f32"  => (a) -> _read_f32(a[1]) / _read_f32(a[2]),
+    "div_f64"  => (a) -> _read_f64(a[1]) / _read_f64(a[2]),
+    "neg_f32"  => (a) -> -_read_f32(a[1]),
+    "neg_f64"  => (a) -> -_read_f64(a[1]),
+    "abs_f32"  => (a) -> abs(_read_f32(a[1])),
+    "abs_f64"  => (a) -> abs(_read_f64(a[1])),
+    "signum_f32" => (a) -> Float32(sign(_read_f32(a[1]))),
+    "signum_f64" => (a) -> Float64(sign(_read_f64(a[1]))),
+    "min_f32"  => (a) -> min(_read_f32(a[1]), _read_f32(a[2])),
+    "min_f64"  => (a) -> min(_read_f64(a[1]), _read_f64(a[2])),
+    "max_f32"  => (a) -> max(_read_f32(a[1]), _read_f32(a[2])),
+    "max_f64"  => (a) -> max(_read_f64(a[1]), _read_f64(a[2])),
+    "clamp_f32"=> (a) -> clamp(_read_f32(a[1]), _read_f32(a[2]), _read_f32(a[3])),
+    "clamp_f64"=> (a) -> clamp(_read_f64(a[1]), _read_f64(a[2]), _read_f64(a[3])),
+    "sum_f32"  => (a) -> reduce((x,y) -> x + _read_f32(y), a[2:end]; init=_read_f32(a[1])),
+    "sum_f64"  => (a) -> reduce((x,y) -> x + _read_f64(y), a[2:end]; init=_read_f64(a[1])),
+    "product_f32" => (a) -> reduce((x,y) -> x * _read_f32(y), a[2:end]; init=_read_f32(a[1])),
+    "product_f64" => (a) -> reduce((x,y) -> x * _read_f64(y), a[2:end]; init=_read_f64(a[1])),
+    "recip_f32"   => (a) -> 1f0 / _read_f32(a[1]),
+    "recip_f64"   => (a) -> 1.0 / _read_f64(a[1]),
+    "fract_f32"   => (a) -> _read_f32(a[1]) - trunc(_read_f32(a[1])),
+    "fract_f64"   => (a) -> _read_f64(a[1]) - trunc(_read_f64(a[1])),
+    "trunc_f32"   => (a) -> trunc(Float32, _read_f32(a[1])),
+    "trunc_f64"   => (a) -> trunc(Float64, _read_f64(a[1])),
+    "floor_f32"   => (a) -> floor(Float32, _read_f32(a[1])),
+    "floor_f64"   => (a) -> floor(Float64, _read_f64(a[1])),
+    "ceil_f32"    => (a) -> ceil(Float32,  _read_f32(a[1])),
+    "ceil_f64"    => (a) -> ceil(Float64,  _read_f64(a[1])),
+    "round_f32"   => (a) -> round(Float32, _read_f32(a[1])),
+    "round_f64"   => (a) -> round(Float64, _read_f64(a[1])),
+    "copysign_f32"=> (a) -> copysign(_read_f32(a[1]), _read_f32(a[2])),
+    "copysign_f64"=> (a) -> copysign(_read_f64(a[1]), _read_f64(a[2])),
+    "powf_f32"    => (a) -> _read_f32(a[1]) ^ _read_f32(a[2]),
+    "powf_f64"    => (a) -> _read_f64(a[1]) ^ _read_f64(a[2]),
+    "powi_f32"    => (a) -> _read_f32(a[1]) ^ Int32(_read_i32(a[2])),
+    "powi_f64"    => (a) -> _read_f64(a[1]) ^ Int32(_read_i32(a[2])),
+    "hypot_f32"   => (a) -> hypot(_read_f32(a[1]), _read_f32(a[2])),
+    "hypot_f64"   => (a) -> hypot(_read_f64(a[1]), _read_f64(a[2])),
+    "sqrt_f32"    => (a) -> sqrt(_read_f32(a[1])),
+    "sqrt_f64"    => (a) -> sqrt(_read_f64(a[1])),
+    "cbrt_f32"    => (a) -> cbrt(_read_f32(a[1])),
+    "cbrt_f64"    => (a) -> cbrt(_read_f64(a[1])),
+    "exp_f32"     => (a) -> exp(_read_f32(a[1])),
+    "exp_f64"     => (a) -> exp(_read_f64(a[1])),
+    "exp2_f32"    => (a) -> exp2(_read_f32(a[1])),
+    "exp2_f64"    => (a) -> exp2(_read_f64(a[1])),
+    "ln_f32"      => (a) -> log(_read_f32(a[1])),
+    "ln_f64"      => (a) -> log(_read_f64(a[1])),
+    "log2_f32"    => (a) -> log2(_read_f32(a[1])),
+    "log2_f64"    => (a) -> log2(_read_f64(a[1])),
+    "log10_f32"   => (a) -> log10(_read_f32(a[1])),
+    "log10_f64"   => (a) -> log10(_read_f64(a[1])),
+    "sin_f32"     => (a) -> sin(_read_f32(a[1])),
+    "sin_f64"     => (a) -> sin(_read_f64(a[1])),
+    "cos_f32"     => (a) -> cos(_read_f32(a[1])),
+    "cos_f64"     => (a) -> cos(_read_f64(a[1])),
+    "tan_f32"     => (a) -> tan(_read_f32(a[1])),
+    "tan_f64"     => (a) -> tan(_read_f64(a[1])),
+    "asin_f32"    => (a) -> asin(_read_f32(a[1])),
+    "asin_f64"    => (a) -> asin(_read_f64(a[1])),
+    "acos_f32"    => (a) -> acos(_read_f32(a[1])),
+    "acos_f64"    => (a) -> acos(_read_f64(a[1])),
+    "atan_f32"    => (a) -> atan(_read_f32(a[1])),
+    "atan_f64"    => (a) -> atan(_read_f64(a[1])),
+    "atan2_f32"   => (a) -> atan(_read_f32(a[1]), _read_f32(a[2])),
+    "atan2_f64"   => (a) -> atan(_read_f64(a[1]), _read_f64(a[2])),
+    "sinh_f32"    => (a) -> sinh(_read_f32(a[1])),
+    "sinh_f64"    => (a) -> sinh(_read_f64(a[1])),
+    "cosh_f32"    => (a) -> cosh(_read_f32(a[1])),
+    "cosh_f64"    => (a) -> cosh(_read_f64(a[1])),
+    "tanh_f32"    => (a) -> tanh(_read_f32(a[1])),
+    "tanh_f64"    => (a) -> tanh(_read_f64(a[1])),
+    "asinh_f32"   => (a) -> asinh(_read_f32(a[1])),
+    "asinh_f64"   => (a) -> asinh(_read_f64(a[1])),
+    "acosh_f32"   => (a) -> acosh(_read_f32(a[1])),
+    "acosh_f64"   => (a) -> acosh(_read_f64(a[1])),
+    "atanh_f32"   => (a) -> atanh(_read_f32(a[1])),
+    "atanh_f64"   => (a) -> atanh(_read_f64(a[1])),
+    "to_radians_f32" => (a) -> deg2rad(_read_f32(a[1])),
+    "to_radians_f64" => (a) -> deg2rad(_read_f64(a[1])),
+    "to_degrees_f32" => (a) -> rad2deg(_read_f32(a[1])),
+    "to_degrees_f64" => (a) -> rad2deg(_read_f64(a[1])),
+
+    # ── f32/f64 constants ─────────────────────────────────────────────
+    "pi_f32"    => (_) -> Float32(π),
+    "pi_f64"    => (_) -> Float64(π),
+    "tau_f32"   => (_) -> Float32(2π),
+    "tau_f64"   => (_) -> Float64(2π),
+    "e_f32"     => (_) -> Float32(ℯ),
+    "e_f64"     => (_) -> Float64(ℯ),
+    "phi_f32"   => (_) -> Float32((1 + sqrt(5)) / 2),
+    "phi_f64"   => (_) -> Float64((1 + sqrt(5)) / 2),
+    "inf_f32"   => (_) -> Inf32,
+    "inf_f64"   => (_) -> Inf,
+    "neginf_f32"=> (_) -> -Inf32,
+    "neginf_f64"=> (_) -> -Inf,
+
+    # ── u128 bitwise ─────────────────────────────────────────────────
+    "u128_and"          => (a) -> _read_u64(a[1]) & _read_u64(a[2]),
+    "u128_or"           => (a) -> _read_u64(a[1]) | _read_u64(a[2]),
+    "u128_xor"          => (a) -> xor(_read_u64(a[1]), _read_u64(a[2])),
+    "u128_not"          => (a) -> ~_read_u64(a[1]),
+    "u128_nand"         => (a) -> ~(_read_u64(a[1]) & _read_u64(a[2])),
+    "u128_nor"          => (a) -> ~(_read_u64(a[1]) | _read_u64(a[2])),
+    "u128_xnor"         => (a) -> ~xor(_read_u64(a[1]), _read_u64(a[2])),
+    "u128_andn"         => (a) -> _read_u64(a[1]) & ~_read_u64(a[2]),
+    "u128_shl"          => (a) -> _read_u64(a[1]) << _read_u32s(a[2]),
+    "u128_shr"          => (a) -> _read_u64(a[1]) >> _read_u32s(a[2]),
+    "u128_swap_bytes"   => (a) -> bswap(_read_u64(a[1])),
+    "u128_reverse_bits" => (a) -> bitreverse(_read_u64(a[1])),
+    "u128_leading_zeros"=> (a) -> UInt64(leading_zeros(_read_u64(a[1]))),
+    "u128_leading_ones" => (a) -> UInt64(leading_ones(_read_u64(a[1]))),
+    "u128_count_zeros"  => (a) -> UInt64(count_zeros(_read_u64(a[1]))),
+    "u128_count_ones"   => (a) -> UInt64(count_ones(_read_u64(a[1]))),
+    "u128_parity"       => (a) -> UInt64(count_ones(_read_u64(a[1])) & 1),
+    "u128_ones"         => (_) -> ~UInt64(0),
+    "u128_zeros"        => (_) -> UInt64(0),
+    "u128_ternarylogic" => (a) -> begin
+        x = _read_u64(a[1]); y = _read_u64(a[2]); z = _read_u64(a[3])
+        UInt64(mapreduce(i -> ((z>>i&1)==1 ? UInt64(1) : UInt64(0)) << i, |, 0:63))
+    end,
+
+    # ── u32 eq + ternary logic variants ──────────────────────────────
+    "u32_eq"          => (a) -> UInt32(_read_u32(a[1]) == _read_u32(a[2]) ? 1 : 0),
+    "u32_ternarylogic"=> (a) -> begin
+        x = _read_u32(a[1]); y = _read_u32(a[2]); z = _read_u32(a[3])
+        mapreduce(i -> ((z>>i&1)==1 ? UInt32(1) : UInt32(0)) << i, |, 0:31)
+    end,
+    "u16_ternarylogic"=> (a) -> begin
+        x = _read_u16(a[1]); y = _read_u16(a[2]); z = _read_u16(a[3])
+        mapreduce(i -> ((z>>i&1)==1 ? UInt16(1) : UInt16(0)) << i, |, 0:15)
+    end,
+    "u64_ternarylogic"=> (a) -> begin
+        x = _read_u64(a[1]); y = _read_u64(a[2]); z = _read_u64(a[3])
+        mapreduce(i -> ((z>>i&1)==1 ? UInt64(1) : UInt64(0)) << i, |, 0:63)
+    end,
+    "u8_ternarylogic" => (a) -> begin
+        x = _read_u8(a[1]); y = _read_u8(a[2]); z = _read_u8(a[3])
+        mapreduce(i -> ((z>>i&1)==1 ? UInt8(1) : UInt8(0)) << i, |, 0:7)
+    end,
+
+    # ── symbol ops ───────────────────────────────────────────────────
+    "reverse_symbol"  => (a) -> reverse(a[1]),
+    # collapse_symbol: takes ONE argument (raw payload from _pure_strip_header).
+    # Arg may be arity expression bytes (from explode_symbol or quote) or plain bytes.
+    # Mirrors collapse_symbol in pure.rs: reads arity-N expression, extracts symbol payloads.
+    "collapse_symbol" => function(a)
+        buf = a[1]
+        isempty(buf) && return UInt8[]
+        tag = try byte_item(buf[1]) catch; nothing end
+        if tag isa ExprArity
+            result = UInt8[]
+            off = 2
+            for _ in 1:Int(tag.arity)
+                off > length(buf) && break
+                st = try byte_item(buf[off]) catch; break end
+                st isa ExprSymbol || break
+                n = Int(st.size)
+                append!(result, buf[off+1 : min(off+n, length(buf))])
+                off += 1 + n
+            end
+            return result
+        end
+        reduce(vcat, a; init=UInt8[])
+    end,
+    # explode_symbol: takes ONE symbol payload, returns MORK arity-N expression.
+    # Mirrors explode_symbol in pure.rs. Called by _pure_eval_formula's MORK_EXPR path.
+    "explode_symbol"  => function(a)
+        payload = a[1]
+        n = length(payload)
+        n == 0 && return UInt8[item_byte(ExprArity(UInt8(0)))]
+        result = UInt8[item_byte(ExprArity(UInt8(n)))]
+        for b in payload
+            push!(result, item_byte(ExprSymbol(UInt8(1))))
+            push!(result, b)
+        end
+        result
+    end,
+    # tuple: takes N arg payloads, returns MORK arity-N expression.
+    # (tuple "0" "1") → [arity(2), sym(1)'0', sym(1)'1']
+    # Mirrors tuple in pure.rs. Called by _pure_eval_formula's MORK_EXPR path.
+    "tuple" => function(a)
+        n = length(a)
+        result = UInt8[item_byte(ExprArity(UInt8(n)))]
+        for payload in a
+            push!(result, item_byte(ExprSymbol(UInt8(length(payload)))))
+            append!(result, payload)
+        end
+        result
+    end,
+
+    # ── hash / encode / decode ────────────────────────────────────────
+    "hash_expr"        => (a) -> _be_bytes(UInt64(hash(a[1]))),
+    "encode_hex"       => (a) -> Vector{UInt8}(bytes2hex(a[1])),
+    "decode_hex"       => (a) -> hex2bytes(String(a[1])),
+    "encode_base64url" => (a) -> Vector{UInt8}(base64encode(a[1])),
+    "decode_base64url" => (a) -> base64decode(String(a[1])),
+
+    # ── control flow ─────────────────────────────────────────────────
+    # ifnz is handled specially in _pure_eval_formula (short-circuit), not via pure_apply
+    "ifnz" => (a) -> _read_u64(a[1]) != 0 ? a[2] : a[3],
+    "then" => (a) -> a[end],
+    "else" => (a) -> a[1],
+
+    # ── expr accessors ────────────────────────────────────────────────
+    "nth_expr" => (a) -> begin
+        idx = Int(_read_u64(a[1]))
+        length(a) > idx ? a[idx+2] : UInt8[]
+    end,
 )
 
 # =====================================================================

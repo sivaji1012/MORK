@@ -208,9 +208,13 @@ end
 function _expr_unify_core!(stack::Vector{Tuple{ExprEnv, ExprEnv}},
                             bindings::Dict{ExprVar, ExprEnv}) :: Union{Dict{ExprVar, ExprEnv}, UnificationFailure}
     iters    = 0
+    # encountered: deduplicates structural child pairs to break cyclic chains.
+    # Mirrors the `encountered` HashSet<(ExprEnv,ExprEnv)> in the Rust `unify`.
+    # Key = (base_id1, offset1, n1, v1, base_id2, offset2, n2, v2)
+    encountered = Set{NTuple{8,UInt64}}()
 
     # deref: follow chain of bindings
-    function _deref(t::ExprEnv)
+    function _deref(t::ExprEnv) :: ExprEnv
         while true
             vo = ee_var_opt(t)
             vo === nothing && return t
@@ -226,13 +230,14 @@ function _expr_unify_core!(stack::Vector{Tuple{ExprEnv, ExprEnv}},
         xvar[1] != e.n && return false
         (_, found, _) = _ee_traverseh(
             (UInt8(e.v), false), e,
-            (h, o)       -> begin (cnt, f) = h; eq = (cnt == xvar[2]); ((cnt + UInt8(1), f || eq), nothing) end,
-            (h, o, r)    -> ((h[1], h[2] || r == xvar[2]), nothing),
-            (h, o, sl)   -> (h, nothing),
+            (h, o)       -> begin (cnt, f) = h; eq = (cnt == xvar[2]); ((cnt + UInt8(1), f || eq), f || eq) end,
+            (h, o, r)    -> begin b = h[2] || r == xvar[2]; ((h[1], b), b) end,
+            (h, o, sl)   -> (h, false),
             (h, o, a)    -> (h, false),
             (h, o, x, y) -> (h, x || y),
             (h, o, acc)  -> (h, acc))
-        return found[2]
+        # found may be nothing for leaf-only expressions — treat as false
+        found === nothing ? false : (found isa Tuple ? found[2] : found)::Bool
     end
 
     # is_unbound: follow variable chain, true if ultimately unbound
@@ -278,11 +283,26 @@ function _expr_unify_core!(stack::Vector{Tuple{ExprEnv, ExprEnv}},
                 if tag1.arity != tag2.arity
                     return UnificationFailure(Val(:difference), dt1, dt2)
                 end
-                # push child pairs
+                # push child pairs with deduplication (mirrors Rust encountered set)
                 children1 = ExprEnv[]; ee_args!(dt1, children1)
                 children2 = ExprEnv[]; ee_args!(dt2, children2)
                 for i in length(children1):-1:1
-                    push!(stack, (children1[i], children2[i]))
+                    c1 = children1[i]; c2 = children2[i]
+                    v1 = ee_var_opt(c1); v2 = ee_var_opt(c2)
+                    # Always push unbound-variable pairs (mirrors Rust special case)
+                    if v1 !== nothing && v2 !== nothing && _is_unbound(v1) && _is_unbound(v2)
+                        push!(stack, (c1, c2))
+                    else
+                        # Deduplicate: skip pair already in encountered
+                        key = (UInt64(objectid(c1.base.buf)), UInt64(c1.offset),
+                               UInt64(c1.n), UInt64(c1.v),
+                               UInt64(objectid(c2.base.buf)), UInt64(c2.offset),
+                               UInt64(c2.n), UInt64(c2.v))
+                        if key ∉ encountered
+                            push!(encountered, key)
+                            push!(stack, (c1, c2))
+                        end
+                    end
                 end
             end
             # NewVar/VarRef pairs handled below; symbol/arity matched above
@@ -304,7 +324,14 @@ end
 # expr_apply — substitution (ports apply in mork_expr)
 # =====================================================================
 
-const APPLY_DEPTH = 64
+# MORK "Rule of 64" design boundaries (from upstream expr/src/lib.rs)
+# These are not arbitrary — they fall directly from the 6-bit fields in the
+# byte tag encoding (Arity/VarRef/SymbolSize all capped at 63).
+const MAX_EXPR_ARITY   = 63   # max children per expression node
+const MAX_SYMBOL_SIZE  = 63   # max bytes in a symbol name
+const MAX_VAR_REFS     = 63   # max variable back-references per expression
+const MAX_SOURCES      = 63   # max sources in a multi-source pattern
+const APPLY_DEPTH      = 64   # max recursion depth in expr_apply
 
 """
     expr_apply(n, original_intros, new_intros, ez, bindings, oz, cycled, stack, assignments)
@@ -324,6 +351,8 @@ function expr_apply(n::UInt8, original_intros::UInt8, new_intros::UInt8,
     length(stack) > APPLY_DEPTH && error("expr_apply depth > $APPLY_DEPTH: n=$n")
 
     while true
+        ez.loc > length(ez.root) && return (original_intros, new_intros)
+        _loc_before = ez.loc          # invariant: must advance each iteration
         b = ez.root.buf[ez.loc]
         tag = byte_item(b)
 
@@ -331,7 +360,6 @@ function expr_apply(n::UInt8, original_intros::UInt8, new_intros::UInt8,
             key = (n, original_intros)
             bound = get(bindings, key, nothing)
             if bound === nothing
-                # not in bindings — check assignments for existing intro
                 pos = findfirst(==(key), assignments)
                 if pos !== nothing
                     ez_write_var_ref!(oz, UInt8(pos - 1))
@@ -340,26 +368,24 @@ function expr_apply(n::UInt8, original_intros::UInt8, new_intros::UInt8,
                     new_intros += UInt8(1)
                     push!(assignments, key)
                 end
-                oz.loc += 1
                 original_intros += UInt8(1)
             else
-                # bound — check for cycles
                 if haskey(cycled, key)
                     ez_write_var_ref!(oz, cycled[key])
-                    oz.loc += 1
                 elseif key in stack
                     cycled[key] = new_intros
                     ez_write_new_var!(oz)
-                    oz.loc += 1
                     new_intros += UInt8(1)
                 else
                     push!(stack, key)
-                    sub_ez = ExprZipper(MORK.Expr(bound.base.buf), Int(bound.offset) + 1)
+                    sub_span = expr_span(bound.base, Int(bound.offset) + 1)
+                    sub_ez = ExprZipper(MORK.Expr(Vector{UInt8}(sub_span)), 1)
                     _, new_intros = expr_apply(bound.n, bound.v, new_intros, sub_ez, bindings, oz, cycled, stack, assignments)
                     pop!(stack)
                 end
                 original_intros += UInt8(1)
             end
+            ez.loc += 1
 
         elseif tag isa ExprVarRef
             idx = tag.idx
@@ -374,38 +400,34 @@ function expr_apply(n::UInt8, original_intros::UInt8, new_intros::UInt8,
                     new_intros += UInt8(1)
                     push!(assignments, key)
                 end
-                oz.loc += 1
             else
                 if haskey(cycled, key)
                     ez_write_var_ref!(oz, cycled[key])
-                    oz.loc += 1
                 elseif key in stack
                     cycled[key] = new_intros
                     ez_write_new_var!(oz)
-                    oz.loc += 1
                     new_intros += UInt8(1)
                 else
                     push!(stack, key)
-                    sub_ez = ExprZipper(MORK.Expr(bound.base.buf), Int(bound.offset) + 1)
+                    sub_span = expr_span(bound.base, Int(bound.offset) + 1)
+                    sub_ez = ExprZipper(MORK.Expr(Vector{UInt8}(sub_span)), 1)
                     _, new_intros = expr_apply(bound.n, bound.v, new_intros, sub_ez, bindings, oz, cycled, stack, assignments)
                     pop!(stack)
                 end
             end
+            ez.loc += 1
 
         elseif tag isa ExprSymbol
             n_sym = Int(tag.size)
             sym_bytes = view(ez.root.buf, ez.loc+1 : ez.loc+n_sym)
             ez_write_symbol!(oz, sym_bytes)
             ez.loc += 1 + n_sym
-            oz.loc  # already advanced by ez_write_symbol!
-            # continue (don't call ez_next! here — we advanced manually)
             _check = ez.loc <= length(ez.root)
             _check || return (original_intros, new_intros)
             continue
 
         elseif tag isa ExprArity
             ez_write_arity!(oz, tag.arity)
-            oz.loc += 1   # skip past the arity we just wrote (ez_write_arity! already advanced)
             ez.loc += 1
         end
 
@@ -415,6 +437,7 @@ function expr_apply(n::UInt8, original_intros::UInt8, new_intros::UInt8,
         if !(tag isa ExprSymbol)
             ez.loc <= length(ez.root) || return (original_intros, new_intros)
         end
+        @assert ez.loc > _loc_before "expr_apply: ez.loc did not advance for tag $(typeof(tag)) at byte 0x$(string(b, base=16))"
     end
 end
 
