@@ -273,6 +273,7 @@ function _expr_unify_core!(stack::Vector{Tuple{ExprEnv, ExprEnv}},
                 return UnificationFailure(Val(:difference), dt1, dt2)
             end
             if tag1 isa ExprSymbol
+                tag2 = tag2::ExprSymbol
                 s1 = Int(tag1.size); s2 = Int(tag2.size)
                 if s1 != s2; return UnificationFailure(Val(:difference), dt1, dt2); end
                 o1 = Int(dt1.offset); o2 = Int(dt2.offset)
@@ -280,6 +281,7 @@ function _expr_unify_core!(stack::Vector{Tuple{ExprEnv, ExprEnv}},
                     return UnificationFailure(Val(:difference), dt1, dt2)
                 end
             elseif tag1 isa ExprArity
+                tag2 = tag2::ExprArity
                 if tag1.arity != tag2.arity
                     return UnificationFailure(Val(:difference), dt1, dt2)
                 end

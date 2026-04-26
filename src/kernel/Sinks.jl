@@ -218,8 +218,10 @@ function sink_apply!(s::HeadSink, bindings::Dict{ExprVar,ExprEnv},
 end
 
 function sink_finalize!(s::HeadSink, btm::PathMap{UnitVal}) :: Bool
+    root = s.head.root
+    root === nothing && return false   # empty head — nothing to join
     wz = write_zipper(btm)
-    status = wz_join_into!(wz, s.head.root)
+    status = wz_join_into!(wz, root)
     status != ALG_STATUS_IDENTITY
 end
 

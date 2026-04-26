@@ -600,6 +600,7 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
         else
             # `O` template functor — apply each template then dispatch to sink.
             # Accumulating sinks (CountSink) use persistent_sinks created before query.
+            ps = persistent_sinks::Vector
             for (k, ee) in enumerate(template_ees)
                 tpl_span = expr_span(ee.base, Int(ee.offset) + 1)
                 tpl_e = MORK.Expr(Vector{UInt8}(tpl_span))
@@ -609,9 +610,9 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
                 expr_apply(UInt8(0), ee.v, UInt8(0), ez, bindings, oz,
                            Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
                 result_expr = MORK.Expr(oz.root.buf[1:oz.loc-1])
-                if persistent_sinks[k] !== nothing
+                if ps[k] !== nothing
                     # Accumulating sink: apply but don't finalize yet
-                    sink_apply!(persistent_sinks[k], bindings, result_expr.buf, s.btm)
+                    sink_apply!(ps[k], bindings, result_expr.buf, s.btm)
                 else
                     # Immediate sink: create fresh, apply, finalize
                     sink = asink_new(result_expr)
@@ -625,8 +626,8 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
     end)
 
     # Finalize accumulating sinks (CountSink etc.) once after all matches
-    if !no_sink
-        for sink in persistent_sinks
+    if !no_sink && persistent_sinks !== nothing
+        for sink in persistent_sinks::Vector
             sink === nothing && continue
             changed = sink_finalize!(sink, s.btm)
             changed && (any_new[] = true)
