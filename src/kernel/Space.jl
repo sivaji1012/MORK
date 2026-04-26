@@ -579,23 +579,42 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
     set_val_at!(_exec_singleton, add_expr.buf, UNIT_VAL)
     read_btm = pjoin(s.btm, _exec_singleton).value  # unwrap AlgResElement
 
+    # Pre-allocate per-template scratch buffers outside the match closure.
+    # Mirrors upstream space.rs: ass/astack/buffer pre-allocated before query_multi,
+    # cleared between iterations with ass.clear() / astack.clear() / buffer.clear().
+    # Saves 5+ heap allocs per (match × template): template copy, output buf, result
+    # slice, rename dict, free/new var vecs.
+    n_tpl     = length(template_ees)
+    tpl_exprs = Vector{MORK.Expr}(undef, n_tpl)    # template Expr per ee
+    out_bufs  = Vector{Vector{UInt8}}(undef, n_tpl) # reusable output buffers
+    tpl_ezs   = Vector{ExprZipper}(undef, n_tpl)    # read zippers (reset loc=1 each call)
+    tpl_ozs   = Vector{ExprZipper}(undef, n_tpl)    # write zippers (reset loc=1 each call)
+    tpl_rdicts = [Dict{ExprVar,UInt8}() for _ in 1:n_tpl]  # rename maps (empty! each call)
+    tpl_fvecs  = [ExprVar[] for _ in 1:n_tpl]              # free_vars  (empty! each call)
+    tpl_nvecs  = [ExprVar[] for _ in 1:n_tpl]              # new_vars   (empty! each call)
+    for (k, ee) in enumerate(template_ees)
+        tpl_span     = expr_span(ee.base, Int(ee.offset) + 1)
+        tpl_exprs[k] = MORK.Expr(Vector{UInt8}(tpl_span))
+        out_bufs[k]  = Vector{UInt8}(undef, max(length(tpl_span) * 4, 64))
+        tpl_ezs[k]   = ExprZipper(tpl_exprs[k], 1)
+        tpl_ozs[k]   = ExprZipper(MORK.Expr(out_bufs[k]), 1)
+    end
+
     # space_query_multi_i uses s.mmaps for ACT file caching (I-pattern)
     query_fn = no_source ? space_query_multi :
                            (btm, pat, v, f) -> space_query_multi_i(btm, pat, v, f; mmaps=s.mmaps)
     touched  = query_fn(read_btm, pat_expr, pat_v, (bindings, loc_expr) -> begin
         if no_sink
             # `,` template functor — apply each template and insert result directly
-            for ee in template_ees
-                tpl_span = expr_span(ee.base, Int(ee.offset) + 1)
-                tpl_e = MORK.Expr(Vector{UInt8}(tpl_span))
-                out_buf = Vector{UInt8}(undef, max(length(tpl_span) * 4, 64))
-                ez = ExprZipper(tpl_e, 1)
-                oz = ExprZipper(MORK.Expr(out_buf), 1)
+            for (k, ee) in enumerate(template_ees)
+                ez = tpl_ezs[k]; ez.loc = 1          # reset read position
+                oz = tpl_ozs[k]; oz.loc = 1          # reset write position (≡ buffer.clear())
+                empty!(tpl_rdicts[k]); empty!(tpl_fvecs[k]); empty!(tpl_nvecs[k])
                 expr_apply(UInt8(0), ee.v, UInt8(0), ez, bindings, oz,
-                           Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
-                result_bytes = oz.root.buf[1:oz.loc-1]
-                old = get_val_at(s.btm, result_bytes)
-                set_val_at!(s.btm, result_bytes, UNIT_VAL)
+                           tpl_rdicts[k], tpl_fvecs[k], tpl_nvecs[k])
+                result_view = @view out_bufs[k][1:oz.loc-1]   # zero-copy view (no slice alloc)
+                old = get_val_at(s.btm, result_view)
+                set_val_at!(s.btm, result_view, UNIT_VAL)
                 old === nothing && (any_new[] = true)
             end
         else
@@ -603,14 +622,12 @@ function space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, pat_v::UInt
             # Accumulating sinks (CountSink) use persistent_sinks created before query.
             ps = persistent_sinks::Vector
             for (k, ee) in enumerate(template_ees)
-                tpl_span = expr_span(ee.base, Int(ee.offset) + 1)
-                tpl_e = MORK.Expr(Vector{UInt8}(tpl_span))
-                out_buf = Vector{UInt8}(undef, max(length(tpl_span) * 4, 64))
-                ez = ExprZipper(tpl_e, 1)
-                oz = ExprZipper(MORK.Expr(out_buf), 1)
+                ez = tpl_ezs[k]; ez.loc = 1
+                oz = tpl_ozs[k]; oz.loc = 1
+                empty!(tpl_rdicts[k]); empty!(tpl_fvecs[k]); empty!(tpl_nvecs[k])
                 expr_apply(UInt8(0), ee.v, UInt8(0), ez, bindings, oz,
-                           Dict{ExprVar,UInt8}(), ExprVar[], ExprVar[])
-                result_expr = MORK.Expr(oz.root.buf[1:oz.loc-1])
+                           tpl_rdicts[k], tpl_fvecs[k], tpl_nvecs[k])
+                result_expr = MORK.Expr(out_bufs[k][1:oz.loc-1]) # copy needed: sink stores ref
                 if ps[k] !== nothing
                     # Accumulating sink: apply but don't finalize yet
                     sink_apply!(ps[k], bindings, result_expr.buf, s.btm)
