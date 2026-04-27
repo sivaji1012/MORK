@@ -1,6 +1,6 @@
 # MORK / PathMap Quality Report
-**Date:** 2026-04-26  
-**MORK:** `ae84337` · **PathMap:** `a121fcd`  
+**Date:** 2026-04-27  
+**MORK:** `7176cbf` · **PathMap:** `8cc61c4`  
 **Julia:** 1.12.6 · **Platform:** Linux x86_64
 
 ---
@@ -136,11 +136,42 @@ Time spread across:
 | 4 | PathMap | `LineListNode.jl:521` | `_convert_to_dense_stub!` ignored capacity arg, hardcoded 2 | Use passed `capacity` (upstream: `with_capacity_in(3)` at upgrade) | insert_1k -11%, pjoin -4% |
 | 5 | PathMap | `ProductZipper.jl:54` | `factor_paths = Int[]` (capacity 0) triggers realloc on first enroll | `sizehint!(fp, length(secondaries))` at construction (upstream: `Vec::with_capacity`) | two_source -10% cumulative |
 
-## 8. No remaining high/medium priority items
+## 8. Constant-Factor Optimisation Sprint (2026-04-27)
 
-All profiler-identified bottlenecks have been addressed. The packages are
-allocation-efficient for typical workloads. Future micro-optimisations (e.g.
-StaticArrays for zipper frames) offer <5% gains and carry a new dependency.
+### Fix 1: Closed union dispatch — `TrieNodeVariant` (PathMap `8cc61c4`)
+
+**Change:** `_fnode` previously returned `AbstractTrieNode{V,A}` (abstract type), forcing
+vtable dispatch on every `first_child_from_key`, `count_branches`, `node_get_child`, etc.
+call in the ProductZipper hot loop.
+
+**Fix:** Define `TrieNodeVariant{V,A} = Union{EmptyNode, LineListNode, DenseByteNode,
+CellByteNode, TinyRefNode, BridgeNode}` (closed union of all 6 concrete node types). Add
+`inner::TrieNodeVariant{V,A}` type assertion in `_fnode`'s non-nothing branch.
+
+**Result (@code_warntype):**
+- Before: `Body::ABSTRACTTRIENODE{INT64, GLOBALALLOC}` — abstract vtable dispatch
+- After:  `Body::UNION{EMPTYNODE, BRIDGENODE, CELLBYTENODE, DENSEBYTENODE, LINELISTNODE, TINYREFNODE}` — closed union, specialised if-else
+
+**Benchmark calibration (baseline → Fix 1):**
+
+| Benchmark | Baseline | Post-Fix-1 | Δ |
+|-----------|----------|------------|---|
+| `unify_flat_pair` | 164 μs | **12.9 μs** | **-92%** |
+| `unify_nested_tree` | 228 μs | **20.9 μs** | **-91%** |
+| `chain_100_steps` | 154 μs | **12.5 μs** | **-92%** |
+| `float_sinks_fsum_50` | 1.18 ms | **68 μs** | **-94%** |
+| `ground_match_200` | 3.38 ms | **379 μs** | **-89%** |
+| `two_source_10x10` | 5.66 ms | **457 μs** | **-92%** |
+| `lookup_1k` | 4.12 ms | **1.21 ms** | **-71%** |
+
+**Model calibration:** Predicted ~30% gain; actual ~10-12× (90-92%). Union dispatch was
+not 30% of cost — it was ~90% of cost. Julia's abstract type dispatch is far more expensive
+than a simple vtable; closing the union enables inlining of the concrete node methods,
+eliminating not just the dispatch overhead but the entire call frame overhead.
+
+**Remaining sprint items:** Fix 2 (fixed-size prefix_buf), Fix 3 (zipper pool), Fix 4 (immutable zippers)
+now face a much smaller absolute base (~13 μs for chain vs 154 μs before). Gains from
+Fixes 2-4 will be proportionally smaller but still compound on the new baseline.
 
 ---
 
