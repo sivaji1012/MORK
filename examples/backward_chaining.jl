@@ -1,47 +1,48 @@
 #!/usr/bin/env julia
-# examples/backward_chaining.jl — Logic reasoning via backward chaining
+# examples/backward_chaining.jl — MM2 Example: Testing Your Code
 #
-# Ports the upstream MORK bc0/bc1 integration test patterns into a
-# self-contained runnable example.
+# Demonstrates: proof search via the `zealous` fixpoint driver, typed
+# application proofs, and modus-ponens chains (bc0 pattern).
+# Upstream: kernel/src/main.rs bc0 (lines 3350–3400)
+# Wiki: https://github.com/trueagi-io/MORK/wiki/MM2-Example:-Testing-Your-Code
 #
-# Run:
-#   julia --project=. examples/backward_chaining.jl
+# The `zealous` driver fires every registered (step ...) rule until no new
+# proofs emerge — a fixpoint strategy for combined forward/backward search.
+#
+# Note: the `abs` rule generates MP instantiations at every goal depth,
+# producing many specialisations of MP. This is intentional (it mirrors
+# the upstream behaviour). Step cap = 50 matches upstream bc0 exactly.
+#
+# Run from warm REPL:  include("examples/backward_chaining.jl")
 
 using MORK
 
-# ── Knowledge base ─────────────────────────────────────────────────────
+println("=== bc0: prove C from A via A→B→C (zealous backward chaining) ===")
 s = new_space()
-space_add_all_sexpr!(s, """
-    ;; Facts
-    (mortal socrates)
-    (human  socrates)
-    (human  plato)
-
-    ;; Rules: humans are mortal
-    (exec 0
-        (, (human \$x))
-        (O (mortal \$x))
-    )
-
-    ;; Rules: mortals can die
-    (exec 1
-        (, (mortal \$x))
-        (O (can-die \$x))
-    )
+space_add_all_sexpr!(s, raw"""
+((step base) (, (goal (: $proof $conclusion)) (kb (: $proof $conclusion)))
+             (, (ev (: $proof $conclusion))))
+((step abs)  (, (goal (: $proof $conclusion)))
+             (, (goal (: $lhs (-> $synth $conclusion)))))
+((step rev)  (, (ev (: $lhs (-> $a $r))) (goal (: $k $r)))
+             (, (goal (: $rhs $a))))
+((step app)  (, (ev (: $lhs (-> $a $r))) (ev (: $rhs $a)))
+             (, (ev (: (@ $lhs $rhs) $r))))
+(exec zealous (, ((step $x) $p0 $t0) (exec zealous $p1 $t1))
+              (, (exec $x $p0 $t0) (exec zealous $p1 $t1)))
+(kb (: a A)) (kb (: ab (R A B))) (kb (: bc (R B C)))
+(kb (: MP (-> (R $p $q) (-> $p $q))))
+(goal (: $proof C))
 """)
-
-steps = space_metta_calculus!(s, 10_000)
+bc_elapsed = @elapsed bc_steps = space_metta_calculus!(s, 50)
 result = space_dump_all_sexpr(s)
+evs = filter(l -> startswith(l, "(ev"), split(result, "\n"))
 
-println("=== Backward Chaining ===")
-println("Converged in $steps steps\n")
-
-for category in ["mortal", "human", "can-die"]
-    matches = filter(l -> startswith(l, "($category "), split(result, "\n"))
-    isempty(matches) || println("$category: $(join(matches, ", "))")
+println("Steps: $bc_steps  Time: $(round(bc_elapsed, digits=2))s  Evidence atoms: $(length(evs))")
+println("\nKey proofs found:")
+for e in filter(e -> occursin("(@ (@ MP", e), evs)
+    println("  $e")
 end
 
-@assert occursin("(mortal plato)", result)    "plato should be mortal"
-@assert occursin("(can-die socrates)", result) "socrates can die"
-@assert occursin("(can-die plato)", result)    "plato can die"
-println("\n✓ All assertions passed")
+@assert any(e -> occursin("(@ (@ MP bc) (@ (@ MP ab) a))", e), evs) "proof of C not found"
+println("\nPASS: proof (@ (@ MP bc) (@ (@ MP ab) a)) : C found")
