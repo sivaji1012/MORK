@@ -216,7 +216,40 @@ and ingest workloads. Pivoting to M-Core IR.
 
 ---
 
-## 9. Platform Compatibility
+## 9. Deferred Architectural Work (Characterized)
+
+Three deferred optimisations identified during the examples sprint — each characterized with a root cause and a clear implementation path:
+
+### D1: PathTrie cheap-clone via arena allocation
+
+**Current:** `deepcopy(s.btm)` was O(n) — replaced with `pjoin+singleton` (O(key_len), Fix 1 of the constant-factor sprint). But self-referential exec drivers (`zealous`, `fixpoint`) still create a "new" atom each cycle because the old one was consumed.
+
+**Root cause:** Julia's `TrieNodeODRc` uses GC-managed heap allocation, not Rust's Arc. PathMap::clone() in Rust is O(1) — an Arc refcount bump. Julia has no equivalent yet.
+
+**Fix path:** Bumper.jl arena allocator + structural sharing of trie subtries (`GlobalAlloc` → `BumpAlloc`). Self-referential drivers become cheap; step caps become upper bounds rather than workarounds. Same class as the deferred write-path arena allocator.
+
+### D2: Supercompiler join-order optimisation (Rule-of-64)
+
+Three independent canonical examples hit 5-source ProductZipper → O(atoms^5) scan:
+- `hexlife` — 5-source CountSink neighbour counting
+- `counter_machine` — 5-source JZ/INC/DEC Peano rules
+- `odd_even_sort` — 5-source phase rule
+
+These three ARE the regression suite for MorkSupercompiler.jl. When supercompilation lands, all three should run at full speed. Before/after numbers will be the headline result.
+
+**Programmer workaround until then:** Decompose 5+ source patterns into multiple smaller-fan-out exec phases (demonstrated in `counter_machine.jl`).
+
+### D3: Exec priority ordering — documentation gap
+
+`space_metta_calculus!` consumes exec atoms once per call. Multi-priority workflows require:
+1. All queries added before running
+2. Separate `exec 0`/`exec 1`/... priorities for each dependency level
+
+This isn't documented in the upstream wiki. **Action:** file upstream doc feedback; add to PRIMUS `METTA_DIALECT_DIFFERENCES.md`.
+
+---
+
+## 10. Platform Compatibility
 
 | Issue | Status |
 |-------|--------|
