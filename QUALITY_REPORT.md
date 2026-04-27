@@ -1,6 +1,6 @@
 # MORK / PathMap Quality Report
 **Date:** 2026-04-27  
-**MORK:** `7176cbf` · **PathMap:** `8cc61c4`  
+**MORK:** `5097817` · **PathMap:** `bc8c9be`  
 **Julia:** 1.12.6 · **Platform:** Linux x86_64
 
 ---
@@ -169,9 +169,50 @@ not 30% of cost — it was ~90% of cost. Julia's abstract type dispatch is far m
 than a simple vtable; closing the union enables inlining of the concrete node methods,
 eliminating not just the dispatch overhead but the entire call frame overhead.
 
-**Remaining sprint items:** Fix 2 (fixed-size prefix_buf), Fix 3 (zipper pool), Fix 4 (immutable zippers)
-now face a much smaller absolute base (~13 μs for chain vs 154 μs before). Gains from
-Fixes 2-4 will be proportionally smaller but still compound on the new baseline.
+### Fix 2: Pre-allocated prefix_buf/ancestors/prefix_idx (PathMap `bc8c9be`)
+
+**Change:** Added `sizehint!` pre-allocation to `prefix_buf` (→ 64 bytes), `ancestors`
+(→ 16 entries), and `prefix_idx` (→ 16 entries) in both `ReadZipperCore` and
+`WriteZipperCore` constructors. Eliminates the 0→1→2→4→8→... reallocation ladder
+on every fresh zipper descent.
+
+**Benchmark calibration (post-Fix-1 → post-Fix-2):**
+
+| Benchmark | Post-Fix-1 | Post-Fix-2 | Δ |
+|-----------|------------|------------|---|
+| `insert_1k` | 3.87 ms | 4.34 ms | ≈ 0% (noise) |
+| `build_200_atoms` | 4.27 ms | 4.30 ms | ≈ 0% |
+| `two_source_10x10` | 457 μs | 466 μs | ≈ 0% |
+
+**Model was wrong:** Predicted ~25% write-path gain; actual ~0%. `sizehint!` eliminated
+`_growend!` reallocation, but `insert_1k` still shows **52,758 allocs** — unchanged.
+The allocs are NOT from `prefix_buf` growth. They are from **trie node allocation**:
+every `DenseByteNode`/`LineListNode` created or split during insertion is a separate
+heap object. ~53 node allocs per key × 1000 keys = 53k allocs. `prefix_buf` growth
+was visible in the profiler but was not the dominant cost.
+
+**Revised picture of remaining write-path bottleneck:**
+- Read path (query/match): ✅ at parity with Rust (Fix 1 gave 10-12×)
+- Write path (insert): still 4ms/1k keys — bounded by trie node allocation, not buffer growth
+- Fixing write path requires arena allocator or node pooling — different architectural class
+
+### Sprint conclusion
+
+**Fixes 3-4 (zipper pool, immutable zippers) deferred.** They target the read path,
+which is already fast (12-466 μs). The write path bottleneck is trie node allocation —
+not addressed by Fixes 3-4. Write latency of 4ms/1k inserts is acceptable for bootstrap
+and ingest workloads. Pivoting to M-Core IR.
+
+**Cumulative sprint gains (original baseline → post-Fix-2):**
+
+| Benchmark | Original | Final | Total Δ |
+|-----------|----------|-------|---------|
+| `chain_100_steps` | 182 μs | **12.9 μs** | **-93%** |
+| `float_sinks_fsum_50` | 1.49 ms | **69 μs** | **-95%** |
+| `ground_match_200` | 4.46 ms | **388 μs** | **-91%** |
+| `two_source_10x10` | 7.61 ms | **466 μs** | **-94%** |
+| `unify_flat_pair` | 450 μs | **13 μs** | **-97%** |
+| `insert_1k` | 5.90 ms | **4.34 ms** | **-26%** (node alloc bound) |
 
 ---
 
