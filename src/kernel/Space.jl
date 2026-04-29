@@ -90,6 +90,11 @@ Create an empty Space.  Mirrors `Space::new`.
 """
 new_space() = Space(PathMap{UnitVal}(), SharedMappingHandle(), false, Dict{String,ArenaCompactTree}())
 
+# Prevent Julia's default struct show from dumping raw PathMap bytes to stdout.
+# Upstream equivalent: Space::statistics() prints "val count N".
+Base.show(io::IO, s::Space) =
+    print(io, "Space($(space_val_count(s)) atoms)")
+
 """    space_val_count(s) → Int
 
 Return the number of expressions stored in the Space.
