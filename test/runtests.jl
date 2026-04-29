@@ -3842,4 +3842,180 @@ const PM = PathMap.PathMap
         end
 
     end   # metta_calculus integration
+
+    @testset "PathMap deferred items" begin
+
+        @testset "act_open_mmap — mmap-backed ACT file" begin
+            m = PM{UInt64}()
+            PathMap.set_val_at!(m, b"alpha",  UInt64(42))
+            PathMap.set_val_at!(m, b"beta",   UInt64(99))
+            PathMap.set_val_at!(m, b"gamma",  UInt64(7))
+
+            tree_vec = PathMap.act_from_zipper(m, v -> v)
+            tmpfile  = tempname() * ".act"
+            PathMap.act_save(tree_vec, tmpfile)
+
+            tree_mmap = PathMap.act_open_mmap(tmpfile)
+            @test tree_mmap isa PathMap.ArenaCompactTree
+            @test length(tree_mmap.data) == filesize(tmpfile)
+            @test tree_mmap.data[1:8] == PathMap.ACT_MAGIC
+
+            @test PathMap.act_get_val_at(tree_mmap, b"alpha")   === UInt64(42)
+            @test PathMap.act_get_val_at(tree_mmap, b"beta")    === UInt64(99)
+            @test PathMap.act_get_val_at(tree_mmap, b"gamma")   === UInt64(7)
+            @test PathMap.act_get_val_at(tree_mmap, b"missing") === nothing
+
+            # mmap and copy agree on all keys
+            tree_copy = PathMap.act_open(tmpfile)
+            for key in (b"alpha", b"beta", b"gamma", b"missing")
+                @test PathMap.act_get_val_at(tree_mmap, key) === PathMap.act_get_val_at(tree_copy, key)
+            end
+
+            # ACTZipper traversal over mmap tree
+            @test PathMap.act_val_count(PathMap.act_read_zipper(tree_mmap)) == 3
+
+            rm(tmpfile; force=true)
+        end
+
+        @testset "remove_val_at! with prune=true" begin
+            m = PM{Int}()
+            PathMap.set_val_at!(m, b"abc", 1)
+            PathMap.set_val_at!(m, b"abd", 2)
+            PathMap.set_val_at!(m, b"xyz", 3)
+
+            old = PathMap.remove_val_at!(m, b"abc", true)
+            @test old === 1
+            @test PathMap.get_val_at(m, b"abc") === nothing
+            @test PathMap.get_val_at(m, b"abd") === 2
+            @test PathMap.get_val_at(m, b"xyz") === 3
+        end
+
+        @testset "wz_remove_branches! with prune=true" begin
+            m = PM{Int}()
+            PathMap.set_val_at!(m, b"foo:a", 10)
+            PathMap.set_val_at!(m, b"foo:b", 20)
+            PathMap.set_val_at!(m, b"bar",   30)
+
+            wz = PathMap.write_zipper_at_path(m, b"foo:")
+            PathMap.wz_remove_branches!(wz, true)
+
+            @test PathMap.get_val_at(m, b"foo:a") === nothing
+            @test PathMap.get_val_at(m, b"foo:b") === nothing
+            @test PathMap.get_val_at(m, b"bar")   === 30
+        end
+
+    end   # PathMap deferred items
+
+    @testset "MORK new sinks" begin
+
+        # Build a [2] U <bytes> header for USink paths
+        _u_hdr()  = UInt8[item_byte(ExprArity(UInt8(2))),
+                           item_byte(ExprSymbol(UInt8(1))), UInt8('U')]
+        # Build a [2] AU <bytes> header for AUSink paths
+        _au_hdr() = UInt8[item_byte(ExprArity(UInt8(2))),
+                           item_byte(ExprSymbol(UInt8(2))), UInt8('A'), UInt8('U')]
+        # Build a symbol sub-expression
+        _sym(s::String) = vcat(item_byte(ExprSymbol(UInt8(length(s)))), Vector{UInt8}(s))
+
+        @testset "CmpSource — stale comment removed, dispatch works" begin
+            s = new_space()
+            space_add_all_sexpr!(s, raw"""
+            (foo 1) (foo 2) (foo 3)
+            (exec 0 (, (foo $x) (== $x $x)) (, (matched $x)))
+            """)
+            steps = space_metta_calculus!(s, 10)
+            @test steps >= 1
+        end
+
+        @testset "USink — identical ground terms unify" begin
+            btm = new_space().btm
+            # Build (U foo) sink; expr bytes don't matter for apply/finalize
+            e_buf = vcat(_u_hdr(), _sym("foo"))
+            sink  = USink(MORK.Expr(e_buf))
+            # Two identical paths → MGU = foo
+            p = vcat(_u_hdr(), _sym("foo"))
+            sink_apply!(sink, Dict(), p, btm)
+            sink_apply!(sink, Dict(), copy(p), btm)
+            @test sink_finalize!(sink, btm) == true
+            @test get_val_at(btm, _sym("foo")) === UNIT_VAL
+        end
+
+        @testset "USink — single path written unchanged" begin
+            btm  = new_space().btm
+            e_buf = vcat(_u_hdr(), _sym("bar"))
+            sink  = USink(MORK.Expr(e_buf))
+            p = vcat(_u_hdr(), _sym("bar"))
+            sink_apply!(sink, Dict(), p, btm)
+            @test sink_finalize!(sink, btm) == true
+            @test get_val_at(btm, _sym("bar")) === UNIT_VAL
+        end
+
+        @testset "USink — conflict on incompatible ground terms" begin
+            btm  = new_space().btm
+            e_buf = vcat(_u_hdr(), _sym("x"))
+            sink  = USink(MORK.Expr(e_buf))
+            sink_apply!(sink, Dict(), vcat(_u_hdr(), _sym("foo")), btm)
+            sink_apply!(sink, Dict(), vcat(_u_hdr(), _sym("bar")), btm)
+            @test sink_finalize!(sink, btm) == false   # conflict → nothing written
+        end
+
+        @testset "AUSink — identical terms → same term written" begin
+            btm  = new_space().btm
+            e_buf = vcat(_au_hdr(), _sym("foo"))
+            sink  = AUSink(MORK.Expr(e_buf))
+            p = vcat(_au_hdr(), _sym("foo"))
+            sink_apply!(sink, Dict(), p, btm)
+            sink_apply!(sink, Dict(), copy(p), btm)
+            @test sink_finalize!(sink, btm) == true
+            @test get_val_at(btm, _sym("foo")) === UNIT_VAL
+        end
+
+        @testset "AUSink — differing terms → fresh variable" begin
+            btm  = new_space().btm
+            e_buf = vcat(_au_hdr(), _sym("x"))
+            sink  = AUSink(MORK.Expr(e_buf))
+            sink_apply!(sink, Dict(), vcat(_au_hdr(), _sym("foo")), btm)
+            sink_apply!(sink, Dict(), vcat(_au_hdr(), _sym("bar")), btm)
+            @test sink_finalize!(sink, btm) == true
+            # LGG of two different symbols is ExprNewVar
+            @test get_val_at(btm, UInt8[item_byte(ExprNewVar())]) === UNIT_VAL
+        end
+
+        @testset "ACTSink — writes .act file on finalize" begin
+            tmpdir   = mktempdir()
+            old_path = ACT_PATH[]
+            ACT_PATH[] = tmpdir
+            try
+                btm  = new_space().btm
+                name = "testfile"
+                e_buf = vcat(item_byte(ExprArity(UInt8(3))),
+                             item_byte(ExprSymbol(UInt8(3))), Vector{UInt8}("ACT")...,
+                             item_byte(ExprSymbol(UInt8(length(name)))), Vector{UInt8}(name)...,
+                             _sym("x"))
+                sink = ACTSink(MORK.Expr(e_buf))
+                # Construct a path that starts with the ACT prefix
+                content = _sym("abc")
+                path    = vcat(e_buf[1:sink.skip], content)
+                sink_apply!(sink, Dict(), path, btm)
+                @test sink_finalize!(sink, btm) == true
+                @test isfile(joinpath(tmpdir, "testfile.act"))
+            finally
+                ACT_PATH[] = old_path
+            end
+        end
+
+        @testset "HashSink — does not throw on valid path" begin
+            btm  = new_space().btm
+            e_buf = vcat(item_byte(ExprArity(UInt8(4))),
+                         item_byte(ExprSymbol(UInt8(4))), Vector{UInt8}("hash")...,
+                         _sym("r"), _sym("c"), _sym("h"))
+            sink = HashSink(MORK.Expr(e_buf))
+            content = vcat(_sym("abc"), _sym("xyz"))
+            path    = vcat(e_buf[1:sink.skip], content)
+            sink_apply!(sink, Dict(), path, btm)
+            @test_nowarn sink_finalize!(sink, btm)
+        end
+
+    end   # MORK new sinks
+
 end

@@ -1,6 +1,6 @@
 # MORK / PathMap Quality Report
-**Date:** 2026-04-27  
-**MORK:** `5097817` · **PathMap:** `bc8c9be`  
+**Date:** 2026-04-29 (updated)  
+**MORK:** `8880f16` → pending commit · **PathMap:** `bc8c9be` → pending commit  
 **Julia:** 1.12.6 · **Platform:** Linux x86_64
 
 ---
@@ -13,7 +13,7 @@
 | windows-latest | ✅ pass | ✅ pass |
 | macos-latest | ✅ pass | ✅ pass |
 
-**Test suite:** 1566 / 1566 pass (MORK) · 33 / 33 pass (PathMap)
+**Test suite:** 1598 / 1598 pass (MORK) · 33 / 33 pass (PathMap)
 
 ---
 
@@ -259,17 +259,52 @@ This isn't documented in the upstream wiki. **Action:** file upstream doc feedba
 
 ---
 
-## 10. Summary
+## 11. Completed Since Initial Report (2026-04-29)
+
+### PathMap deferred items (3/3 complete)
+
+| Item | Status |
+|------|--------|
+| `act_open_mmap` — real `Mmap.mmap()` backing (zero-copy read-only) | ✅ Implemented |
+| `wz_remove_val!` prune=true — calls `wz_prune_path!` after removal | ✅ Implemented |
+| `_wz_remove_branches!` prune=true — calls `_wz_prune_path_internal!` | ✅ Implemented |
+
+All three verified in `MORK/test/runtests.jl` under "PathMap deferred items".
+
+### MORK sink/source stubs (5/5 complete)
+
+| Stub | Implementation | Notes |
+|------|---------------|-------|
+| `CmpSource` | ✅ Already working — stale comment removed | `==`/`!=` pattern matching via `DependentZipper` |
+| `ACTSink` | ✅ Implemented | Buffers paths → `act_from_zipper` + `act_save` on finalize |
+| `USink` | ✅ Implemented (Julia-enhanced) | `expr_unify` + `expr_apply` replaces Rust raw-ptr accumulation |
+| `AUSink` | ✅ Implemented (Julia-native LGG) | `_AuState` memo mirrors `AuState` in `mork_expr`; `VarRef` reuse for repeated pairs |
+| `HashSink` | ✅ Implemented | `_zipper_subtrie_hash` via path enumeration; `try byte_item` guard |
+
+All five verified in `MORK/test/runtests.jl` under "MORK new sinks".
+
+### Still deferred (external dependencies)
+
+| Stub | Reason |
+|------|--------|
+| `WASMSink` | Requires `wasmtime` runtime |
+| `Z3Sink` | Requires Z3 SMT solver |
+
+---
+
+## 12. Summary
 
 | Category | Status |
 |----------|--------|
 | CI (3 platforms × 2 packages) | ✅ 6/6 green |
-| Test suite | ✅ 1566/1566 + 33/33 |
+| Test suite | ✅ 1598/1598 (MORK) + 33/33 (PathMap) |
 | JET static analysis | ✅ 5 bugs fixed, 0 remaining in hot paths |
 | Type stability (hot paths) | ✅ 0 `::Any`, 0 union splits |
 | Lint (5 structural checks) | ✅ 5/5 pass |
 | Benchmark suite | ✅ 13 benchmarks, baseline recorded |
 | Profile analysis | ✅ Two bottlenecks identified and documented |
 | Windows serialization | ✅ Fixed (`ZStream` layout) |
+| PathMap deferred items | ✅ 3/3 complete (`act_open_mmap`, `wz_remove_val!` prune, `_wz_remove_branches!` prune) |
+| MORK sink/source stubs | ✅ 5/5 complete (`CmpSource`, `ACTSink`, `USink`, `AUSink`, `HashSink`) |
 
-**The packages are production-quality for a v0.x release.** The two highest-priority optimisations (bindings deepcopy, key-string allocation) are independent of the public API and can be addressed in a follow-up without breaking any existing callers.
+**The packages are production-quality for a v0.x release.** Remaining deferred work: arena allocator (D1), supercompiler (D2), WASMSink/Z3Sink (external deps).

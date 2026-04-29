@@ -374,21 +374,309 @@ function sink_finalize!(s::AndSink, btm::PathMap{UnitVal}) :: Bool
 end
 
 # =====================================================================
-# Stub sinks (require external crates)
+# External-dep stubs — require wasmtime / Z3 (skip)
 # =====================================================================
 
-struct ACTSink  <: AbstractSink; expr::MORK.Expr; end
 struct WASMSink <: AbstractSink; expr::MORK.Expr; end
 struct Z3Sink   <: AbstractSink; expr::MORK.Expr; end
-struct USink    <: AbstractSink; expr::MORK.Expr; end
-struct AUSink   <: AbstractSink; expr::MORK.Expr; end
-struct HashSink <: AbstractSink; expr::MORK.Expr; end
 
-for T in (ACTSink, WASMSink, Z3Sink, USink, AUSink, HashSink)
+for T in (WASMSink, Z3Sink)
     @eval sink_apply!(::$T, ::Dict, ::Vector{UInt8}, ::PathMap{UnitVal}) =
-        error($(string(T)) * " not yet ported")
+        error($(string(T)) * " requires external runtime (wasmtime/Z3)")
     @eval sink_finalize!(::$T, ::PathMap{UnitVal}) =
-        error($(string(T)) * " not yet ported")
+        error($(string(T)) * " requires external runtime (wasmtime/Z3)")
+end
+
+# =====================================================================
+# ACTSink — write matched paths to an ArenaCompact (.act) file
+# (ACT <filename> <expr>)
+# Mirrors ACTSink in sinks.rs — Julia-native: uses act_from_zipper + act_save.
+# =====================================================================
+
+mutable struct ACTSink <: AbstractSink
+    expr ::MORK.Expr
+    tmp  ::PathMap{UnitVal}
+    name ::String
+    skip ::Int
+end
+
+function ACTSink(e::MORK.Expr)
+    buf  = e.buf
+    name = ""
+    # buf layout: [3] ACT <name_sym> <name_bytes> <content_expr>
+    # bytes:       1    4     1          name_len
+    if length(buf) >= 6
+        name_tag = byte_item(buf[6])
+        if name_tag isa ExprSymbol
+            nl   = Int(name_tag.size)
+            name = String(buf[7 : 6 + nl])
+        end
+    end
+    # skip = arity(1) + sym_header(1) + "ACT"(3) + name_sym_header(1) + name_bytes
+    skip = 6 + length(name)
+    ACTSink(e, PathMap{UnitVal}(), name, skip)
+end
+
+function sink_apply!(s::ACTSink, ::Dict, path::Vector{UInt8}, ::PathMap{UnitVal})
+    length(path) > s.skip || return
+    set_val_at!(s.tmp, path[s.skip+1:end], UNIT_VAL)
+end
+
+function sink_finalize!(s::ACTSink, ::PathMap{UnitVal}) :: Bool
+    isempty(s.tmp) && return false
+    tree = act_from_zipper(s.tmp, _ -> UInt64(0))
+    filepath = joinpath(ACT_PATH[], s.name * ".act")
+    act_save(tree, filepath)
+    # reset for potential reuse
+    s.tmp = PathMap{UnitVal}()
+    true
+end
+
+# =====================================================================
+# USink — unification sink: accumulate matches → MGU → insert
+# (U <expr>)
+# Mirrors USink in sinks.rs — Julia-enhanced: uses expr_unify + expr_apply
+# instead of raw unsafe pointer arithmetic.
+# =====================================================================
+
+mutable struct USink <: AbstractSink
+    expr     ::MORK.Expr
+    buf      ::Union{Nothing, Vector{UInt8}}  # accumulated MGU bytes
+    conflict ::Bool
+end
+
+USink(e::MORK.Expr) = USink(e, nothing, false)
+
+function sink_apply!(s::USink, ::Dict, path::Vector{UInt8}, ::PathMap{UnitVal})
+    length(path) > 3 || return
+    s.conflict && return
+    # Skip [2] U header (3 bytes: arity + sym_header + 'U')
+    expr_bytes = path[4:end]
+    if s.buf === nothing
+        s.buf = copy(expr_bytes)
+    else
+        acc = s.buf::Vector{UInt8}
+        pairs = Tuple{ExprEnv,ExprEnv}[
+            (ExprEnv(UInt8(0), UInt8(0), UInt32(0), MORK.Expr(acc)),
+             ExprEnv(UInt8(0), UInt8(0), UInt32(0), MORK.Expr(expr_bytes)))
+        ]
+        result = expr_unify(pairs)
+        if result isa UnificationFailure
+            s.conflict = true
+            return
+        end
+        # Apply bindings to accumulator to get concrete MGU bytes
+        ez  = ExprZipper(MORK.Expr(acc))
+        out = sizehint!(Vector{UInt8}(), max(length(acc) * 2, 64))
+        resize!(out, max(length(acc) * 2, 64))
+        oz  = ExprZipper(MORK.Expr(out))
+        expr_apply(ez, result, oz)
+        s.buf = out[1:oz.loc-1]
+    end
+end
+
+function sink_finalize!(s::USink, btm::PathMap{UnitVal}) :: Bool
+    s.conflict && return false
+    s.buf === nothing && return false
+    buf = s.buf::Vector{UInt8}
+    old = get_val_at(btm, buf)
+    set_val_at!(btm, buf, UNIT_VAL)
+    s.buf = nothing; s.conflict = false   # reset
+    old === nothing
+end
+
+# =====================================================================
+# AUSink — anti-unification sink: find least-general generalisation
+# (AU <expr>)
+# Mirrors AUSink in sinks.rs — Julia-native implementation of anti-unify;
+# no equivalent exists in upstream Julia mork_expr.
+# Anti-unification: matching positions copied, differing positions → ExprNewVar.
+# =====================================================================
+
+# Anti-unification state — mirrors AuState in mork_expr/src/lib.rs.
+# memo: (offset_in_e1, offset_in_e2) → variable_index (UInt8)
+# Memoizing ensures the same disagreement pair reuses the same variable (LGG correctness).
+mutable struct _AuState
+    next_var ::UInt8
+    memo     ::Dict{Tuple{Int,Int}, UInt8}   # (i1,i2) → var_idx
+end
+_AuState() = _AuState(UInt8(0), Dict{Tuple{Int,Int}, UInt8}())
+
+mutable struct AUSink <: AbstractSink
+    expr ::MORK.Expr
+    buf  ::Union{Nothing, Vector{UInt8}}  # accumulated LGG bytes
+    last ::Int                            # valid length in buf
+    st   ::_AuState                       # anti-unify memo (reset on finalize)
+end
+
+AUSink(e::MORK.Expr) = AUSink(e, nothing, 0, _AuState())
+
+# Recursive anti-unification of two sub-expressions.
+# Returns (bytes_consumed_from_e1, bytes_consumed_from_e2).
+# Mirrors anti_unify_apply in mork_expr/src/lib.rs.
+function _au_merge!(e1::Vector{UInt8}, i1::Int,
+                    e2::Vector{UInt8}, i2::Int,
+                    out::Vector{UInt8},
+                    st::_AuState) :: Tuple{Int,Int}
+    (i1 > length(e1) || i2 > length(e2)) && (push!(out, item_byte(ExprNewVar())); return (0, 0))
+    b1 = e1[i1]; b2 = e2[i2]
+    t1 = byte_item(b1); t2 = byte_item(b2)
+
+    # decomposable: same symbol content
+    if t1 isa ExprSymbol && t2 isa ExprSymbol && t1.size == t2.size
+        n = Int(t1.size)
+        if i1+n <= length(e1)+1 && i2+n <= length(e2)+1 &&
+                view(e1, i1:i1+n) == view(e2, i2:i2+n)
+            append!(out, view(e1, i1:i1+n))
+            return (n+1, n+1)
+        end
+    end
+
+    # decomposable: same arity — recurse into children
+    if t1 isa ExprArity && t2 isa ExprArity && t1.arity == t2.arity
+        push!(out, b1)
+        c1 = 1; c2 = 1
+        for _ in 1:Int(t1.arity)
+            dc1, dc2 = _au_merge!(e1, i1+c1, e2, i2+c2, out, st)
+            c1 += dc1; c2 += dc2
+        end
+        return (c1, c2)
+    end
+
+    # Disagreement (including variables treated as atoms per upstream).
+    # Memoize: same (i1,i2) pair → reuse variable via VarRef (LGG correctness).
+    key = (i1, i2)
+    if haskey(st.memo, key)
+        push!(out, item_byte(ExprVarRef(st.memo[key])))
+    else
+        v = st.next_var
+        st.memo[key] = v
+        st.next_var  = UInt8(v + 1)
+        push!(out, item_byte(ExprNewVar()))
+    end
+    s1 = _expr_end_offset(e1, i1) - i1
+    s2 = _expr_end_offset(e2, i2) - i2
+    (s1, s2)
+end
+
+function sink_apply!(s::AUSink, ::Dict, path::Vector{UInt8}, ::PathMap{UnitVal})
+    length(path) > 4 || return
+    # Skip [2] AU header: arity(1) + sym_header(1) + 'A'(1) + 'U'(1) = 4 bytes
+    expr_bytes = path[5:end]
+    if s.buf === nothing
+        s.buf = copy(expr_bytes)
+        s.last = length(expr_bytes)
+    else
+        acc = s.buf::Vector{UInt8}
+        out = sizehint!(Vector{UInt8}(), max(length(acc), 32))
+        _au_merge!(acc, 1, expr_bytes, 1, out, s.st)
+        s.buf = out
+        s.last = length(out)
+    end
+end
+
+function sink_finalize!(s::AUSink, btm::PathMap{UnitVal}) :: Bool
+    s.buf === nothing && return false
+    buf  = s.buf::Vector{UInt8}
+    last = s.last
+    last == 0 && return false
+    key = buf[1:last]
+    old = get_val_at(btm, key)
+    set_val_at!(btm, key, UNIT_VAL)
+    s.buf = nothing; s.last = 0; s.st = _AuState()   # reset
+    old === nothing
+end
+
+# =====================================================================
+# HashSink — content-addressed hash verification sink
+# (hash <result-tpl> <context> <hash-expr>)
+# Mirrors HashSink in sinks.rs — Julia-native: uses zipper_fork! + path
+# enumeration hash instead of raw-pointer subtrie hash.
+# Semantics: for each collected path, verify that the last SIZE bytes
+# equal the structural hash of the sub-trie rooted just before those bytes.
+# If verified, write the path (minus the hash bytes) to btm.
+# =====================================================================
+
+mutable struct HashSink <: AbstractSink
+    expr   ::MORK.Expr
+    unique ::PathMap{UnitVal}
+    skip   ::Int
+end
+
+function HashSink(e::MORK.Expr)
+    buf  = e.buf
+    # layout: [4] hash <result-tpl> <context> <hash-expr>
+    # skip = arity(1) + sym_header(1) + "hash"(4) = 6 bytes
+    skip = 6
+    HashSink(e, PathMap{UnitVal}(), skip)
+end
+
+function sink_apply!(s::HashSink, ::Dict, path::Vector{UInt8}, ::PathMap{UnitVal})
+    length(path) > s.skip || return
+    set_val_at!(s.unique, path[s.skip+1:end], UNIT_VAL)
+end
+
+# Compute a deterministic structural hash of all paths reachable from zipper z.
+# Julia-native equivalent of upstream fork_read_zipper().hash().
+function _zipper_subtrie_hash(z::ReadZipperCore{UnitVal, GlobalAlloc}) :: UInt64
+    fork = zipper_fork!(z)
+    zipper_reset!(fork)
+    h = UInt64(0xa9e17c4d3f8b21c5)   # fixed seed — deterministic across calls
+    while zipper_to_next_val!(fork)
+        for b in zipper_path(fork); h = hash(b, h); end
+        h = hash(UInt64(0xffffffff), h)  # path terminator
+    end
+    h
+end
+
+function sink_finalize!(s::HashSink, btm::PathMap{UnitVal}) :: Bool
+    isempty(s.unique) && return false
+    changed = false
+
+    rz = read_zipper(s.unique)
+    zipper_reset!(rz)
+
+    # Iterate over all collected paths
+    while zipper_to_next_val!(rz)
+        path = collect(zipper_path(rz))
+        isempty(path) && continue
+
+        # Scan path right-to-left for a symbol-size header byte
+        i = length(path)
+        while i >= 1
+            tag = try byte_item(path[i]) catch; i -= 1; continue end
+            tag isa ExprSymbol || (i -= 1; continue)
+            sz = Int(tag.size)
+            # Check that `sz` bytes follow the header
+            i + sz > length(path) && (i -= 1; continue)
+
+            hash_bytes = path[i+1 : i+sz]
+
+            # Position zipper at the prefix (everything before the size header)
+            prefix = path[1:i-1]
+            rz2 = read_zipper(s.unique)
+            zipper_descend_to!(rz2, prefix)
+            zipper_path_exists(rz2) || (i -= 1; continue)
+
+            # Compute structural hash of the sub-trie at this prefix
+            computed = _zipper_subtrie_hash(rz2)
+            cnt_str  = reinterpret(UInt8, [hton(computed)])   # big-endian
+
+            # Verify: do the hash bytes equal the computed hash?
+            if hash_bytes == cnt_str[1:sz]
+                # Write path without the size-header + hash bytes
+                key = isempty(prefix) ? UInt8[] : prefix
+                old = get_val_at(btm, key)
+                set_val_at!(btm, key, UNIT_VAL)
+                old === nothing && (changed = true)
+            end
+            break   # only check rightmost symbol — mirrors upstream
+        end
+    end
+
+    # Reset for reuse
+    s.unique = PathMap{UnitVal}()
+    changed
 end
 
 # =====================================================================
@@ -845,3 +1133,4 @@ export ACTSink, WASMSink, PureSink, Z3Sink, USink, AUSink, HashSink
 export _pure_eval_formula, _expr_end_offset
 export FloatReductionSink
 export asink_new, asink_compat
+export _au_merge!, _zipper_subtrie_hash

@@ -162,7 +162,8 @@ end
     CmpSource
 
 DependentZipper-based equality/inequality comparison source.
-Mirrors `CmpSource` in sources.rs.  NOT YET PORTED — stubs throw.
+Mirrors `CmpSource` in sources.rs.
+`==` matches paths equal to the primary; `!=` matches all paths except the primary.
 """
 struct CmpSource
     expr ::MORK.Expr
@@ -272,3 +273,4 @@ export ResourceRequest
 export AbstractSource, CompatSource, BTMSource, ACTSource, CmpSource
 export ASource, asource_new, asource_compat
 export source_requests, source_factor
+export ACT_PATH
