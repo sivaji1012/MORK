@@ -6,7 +6,8 @@ Dispatches GET/POST requests to command handlers.
 
 Environment variables (mirrors upstream):
   MORK_SERVER_ADDR  — bind address (default "127.0.0.1")
-  MORK_SERVER_PORT  — port (default "8080")
+  MORK_SERVER_PORT  — port (default "8000")
+  MORK_SERVER_DIR   — resource/ACT file directory (default "/tmp/mork_server_files")
 
 Usage:
   server = MorkServer()
@@ -15,10 +16,12 @@ Usage:
 
 using HTTP
 
-const SERVER_ADDR_ENV = "MORK_SERVER_ADDR"
-const SERVER_PORT_ENV = "MORK_SERVER_PORT"
-const DEFAULT_ADDR    = "127.0.0.1"
-const DEFAULT_PORT    = "8080"
+const SERVER_ADDR_ENV    = "MORK_SERVER_ADDR"
+const SERVER_PORT_ENV    = "MORK_SERVER_PORT"
+const SERVER_DIR_ENV     = "MORK_SERVER_DIR"
+const DEFAULT_ADDR       = "127.0.0.1"
+const DEFAULT_PORT       = "8000"
+const DEFAULT_SERVER_DIR = "/tmp/mork_server_files"
 
 # =====================================================================
 # MorkServer — mirrors MorkService in main.rs
@@ -33,8 +36,9 @@ mutable struct MorkServer
 end
 
 function MorkServer(; addr::String=get(ENV, SERVER_ADDR_ENV, DEFAULT_ADDR),
-                      port::Int=parse(Int, get(ENV, SERVER_PORT_ENV, DEFAULT_PORT)))
-    MorkServer(ServerSpace(), addr, port, Ref(false), Ref(0))
+                      port::Int=parse(Int, get(ENV, SERVER_PORT_ENV, DEFAULT_PORT)),
+                      resource_dir::String=get(ENV, SERVER_DIR_ENV, DEFAULT_SERVER_DIR))
+    MorkServer(ServerSpace(resource_dir), addr, port, Ref(false), Ref(0))
 end
 
 # =====================================================================
@@ -172,6 +176,9 @@ or the process is interrupted.  Mirrors `MorkService::run` in main.rs.
 function serve!(server::MorkServer; verbose::Bool=true)
     addr = "$(server.addr):$(server.port)"
     verbose && println("MORK server starting on http://$addr")
+    # Sync ACT_PATH to the server's resource directory so ACTSink/ACTSource
+    # resolve relative .act filenames to the correct location.
+    ACT_PATH[] = server.ss.resource_store.dir_path
 
     server.stop_flag[] = false
 

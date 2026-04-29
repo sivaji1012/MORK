@@ -12,7 +12,7 @@ Julia translation:
   - Rust `tokio::task::spawn_blocking` → `Threads.@spawn`
   - Rust `WorkResult::Immediate(bytes)` → `(:ok, bytes)`
   - Rust `StatusRecord::CountResult(n)` → `StatusRecord(STATUS_COUNT_RESULT, string(n), n)`
-  - Rust `derive_prefix_from_expr_slice` → not yet ported (stub: use empty prefix)
+  - Rust `derive_prefix_from_expr_slice` → ported as `_derive_prefix` (line ~74)
   - Rust `pattern_template_from_sexpr_pair` → `_parse_pattern_template`
 """
 
@@ -65,9 +65,6 @@ function _parse_pattern_template(ss::ServerSpace, pat_str::String, tpl_str::Stri
     (pat, tpl)
 end
 
-# Derive a path prefix from an expression (stub — upstream uses
-# derive_prefix_from_expr_slice which finds the longest ground prefix)
-# For now returns empty prefix (matches all).
 # _derive_prefix: constant prefix of expr up to first NewVar/VarRef.
 # "a" → full; "(isa)" → full; "(isa \$x \$y)" → [Arity3, "isa"]; "\$x" → []
 # Mirrors derive_prefix_from_expr_slice + till_constant_to_till_last_constant.
