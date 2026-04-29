@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# pre-commit hook — blocks commits containing hardcoded local paths.
+# Install: git config core.hooksPath .githooks
+
+set -euo pipefail
+
+# Patterns that must never appear in committed source files.
+BLOCKED_PATTERNS=(
+    "/home/shivaji1012"
+    "/home/sivaji1012"
+    "/Users/shivaji"
+    "shivaji10@gmail.com"
+)
+
+# File extensions to check (skip binaries, lock files, etc.)
+CHECKED_EXTENSIONS="\.(jl|toml|md|yml|yaml|sh|py|json|txt)$"
+
+EXIT=0
+
+for pattern in "${BLOCKED_PATTERNS[@]}"; do
+    # Search staged files only (--cached), skip deleted files
+    matches=$(git diff --cached --name-only --diff-filter=ACMR | \
+              grep -E "$CHECKED_EXTENSIONS" | \
+              xargs grep -l "$pattern" 2>/dev/null || true)
+
+    if [[ -n "$matches" ]]; then
+        echo ""
+        echo "❌  COMMIT BLOCKED — hardcoded local path detected: '$pattern'"
+        echo "    Found in:"
+        echo "$matches" | sed 's/^/      /'
+        echo ""
+        echo "    Use relative paths or environment variables instead."
+        echo "    To bypass (e.g. legitimate mention in a comment): git commit --no-verify"
+        EXIT=1
+    fi
+done
+
+exit $EXIT

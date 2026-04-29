@@ -1,6 +1,11 @@
 # Claude Code local settings — not for public repos
 .claude/
 
+# ⚠️  NEVER commit files containing hardcoded local paths such as:
+#     /home/<username>/...   /Users/<username>/...   user@email.com
+# A pre-commit hook enforces this automatically.
+# Install: git config core.hooksPath .githooks
+
 # Julia build artifacts
 *.jl.cov
 *.jl.mem
