@@ -1,6 +1,6 @@
 # MORK / PathMap Quality Report
-**Date:** 2026-04-29 (updated)  
-**MORK:** `8880f16` → pending commit · **PathMap:** `bc8c9be` → pending commit  
+**Date:** 2026-04-29  
+**MORK:** `507cea8` · **PathMap:** `262e269`  
 **Julia:** 1.12.6 · **Platform:** Linux x86_64
 
 ---
