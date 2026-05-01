@@ -46,6 +46,56 @@ const SPACE_ARITIES = _build_space_mask(t -> t isa ExprArity)
 const SPACE_VARS    = _build_space_mask(t -> t isa ExprNewVar || t isa ExprVarRef)
 
 # =====================================================================
+# Fix 3: task-local ReadZipperCore pool — eliminates per-query heap alloc
+# =====================================================================
+#
+# Each call to _space_query_multi_inner! previously allocated fresh
+# ReadZipperCore objects for secondary factors via read_zipper_at_path.
+# The pool stores up to 8 reusable zippers per task.  On checkout the
+# zipper is reinitialized from the current btm root; on return it is
+# handed back to the pool (no reset needed — reinit is always full).
+#
+# Uses Julia's built-in task_local_storage so it is task-safe by
+# construction and does not require any external packages.
+
+const _ZIPPER_POOL_KEY = :_mork_zipper_pool
+
+@inline function _zipper_pool_get!() :: Vector{Any}
+    get!(task_local_storage(), _ZIPPER_POOL_KEY, Any[])::Vector{Any}
+end
+
+@inline function _pool_checkout!(pool::Vector{Any})
+    isempty(pool) ? nothing : pop!(pool)
+end
+
+@inline function _pool_return!(pool::Vector{Any}, z)
+    length(pool) < 8 && push!(pool, z)
+    nothing
+end
+
+"""
+    _reinit_zipper_from_btm!(z, btm::PathMap{UnitVal})
+
+Reset a pooled ReadZipperCore to point at the root of `btm`.
+Reuses the existing prefix_buf and ancestors vectors (just resizes them)
+so the only allocation is the node reference update — no heap alloc.
+"""
+@inline function _reinit_zipper_from_btm!(z, btm::PathMap{UnitVal})
+    _ensure_root!(btm)   # exported from PathMap, in scope via `using PathMap`
+    root_rc              = btm.root::TrieNodeODRc{UnitVal, GlobalAlloc}
+    z.root_node          = root_rc
+    z.root_val           = btm.root_val
+    z.alloc              = btm.alloc
+    z.root_key_start     = 0
+    z.origin_path_len    = 0
+    resize!(z.prefix_buf, 0)
+    empty!(z.ancestors)
+    z.focus_node         = root_rc.node
+    z.focus_iter_token   = NODE_ITER_INVALID   # exported from PathMap
+    nothing
+end
+
+# =====================================================================
 # SpaceParser — tokenizer without interning (mirrors ParDataParser, no-intern)
 # =====================================================================
 
@@ -442,10 +492,30 @@ function _space_query_multi_inner!(btm::PathMap{UnitVal},
     sources = pat_args[2:end]
 
     candidate = 0
+    # Fix 3: checkout secondary zippers from the task-local pool instead of
+    # allocating fresh ReadZipperCore objects on every call.  The primary is
+    # still freshly allocated (ProductZipper mutates it as its cursor).
+    # Pooled zippers are reinitialized from btm before use and returned after
+    # ProductZipper is constructed (constructor only reads root_node/root_val/alloc).
+    pool       = _zipper_pool_get!()
+    n_secondaries = n_factors - 2
+    secondaries_pooled = Vector{Any}(undef, n_secondaries)
     try
-        primary     = read_zipper_at_path(btm, UInt8[])
-        secondaries = [read_zipper_at_path(btm, UInt8[]) for _ in 1:(n_factors-2)]
-        prz         = ProductZipper(primary, secondaries)
+        primary   = read_zipper_at_path(btm, UInt8[])
+        for i in 1:n_secondaries
+            z = _pool_checkout!(pool)
+            if z === nothing
+                z = read_zipper_at_path(btm, UInt8[])
+            else
+                _reinit_zipper_from_btm!(z, btm)
+            end
+            secondaries_pooled[i] = z
+        end
+        prz = ProductZipper(primary, secondaries_pooled)
+        # Return secondaries to pool immediately — ProductZipper extracted root refs
+        for i in 1:n_secondaries
+            _pool_return!(pool, secondaries_pooled[i])
+        end
 
         while pz_to_next_val!(prz)
             pz_focus_factor(prz) != pz_factor_count(prz) - 1 && continue
