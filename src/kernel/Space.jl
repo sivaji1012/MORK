@@ -968,6 +968,51 @@ space_transform_multi_multi!(s::Space, pat_expr::MORK.Expr, tpl_expr::MORK.Expr,
                               add_expr::MORK.Expr) =
     space_transform_multi_multi!(s, pat_expr, UInt8(0), tpl_expr, UInt8(0), add_expr)
 
+# ── specialize_io named variants (mirrors #[cfg(feature="specialize_io")] in Rust) ─────
+#
+# In Rust, specialize_io creates separate function bodies to avoid runtime flag checks
+# and let the compiler eliminate dead branches.  In Julia, JIT specializes on Bool
+# constants anyway, but named dispatch makes the intent clear and matches upstream.
+#
+# (`,`, `,`) — most common: trie query + direct write
+"""
+    space_transform_comma_comma!(s, pat, tpl, add) — `,` source, `,` sink.
+Mirrors `transform_multi_multi_` (the most common, fastest path).
+Uses ProductZipper trie query + direct set_val_at! (no sink object overhead).
+"""
+space_transform_comma_comma!(s::Space, pat::MORK.Expr, tpl::MORK.Expr, add::MORK.Expr) =
+    space_transform_multi_multi!(s, pat, UInt8(0), tpl, UInt8(0), add;
+                                  no_source=true, no_sink=true)
+
+# (`I`, `,`) — external ASource + direct write
+"""
+    space_transform_i_comma!(s, pat, tpl, add) — `I` source, `,` sink.
+Mirrors `transform_multi_multi_i`. Uses ASource dispatch (BTM/CmpSource/ACTSource)
+for the source, direct set_val_at! for output.
+"""
+space_transform_i_comma!(s::Space, pat::MORK.Expr, tpl::MORK.Expr, add::MORK.Expr) =
+    space_transform_multi_multi!(s, pat, UInt8(0), tpl, UInt8(0), add;
+                                  no_source=false, no_sink=true)
+
+# (`,`, `O`) — trie query + sink dispatch
+"""
+    space_transform_comma_o!(s, pat, tpl, add) — `,` source, `O` sink.
+Mirrors `transform_multi_multi_o`. Uses ProductZipper trie query; routes output
+through ASink machinery (CountSink, FloatReductionSink, PureSink, etc.).
+"""
+space_transform_comma_o!(s::Space, pat::MORK.Expr, tpl::MORK.Expr, add::MORK.Expr) =
+    space_transform_multi_multi!(s, pat, UInt8(0), tpl, UInt8(0), add;
+                                  no_source=true, no_sink=false)
+
+# (`I`, `O`) — external ASource + sink dispatch (the fully general path)
+"""
+    space_transform_i_o!(s, pat, tpl, add) — `I` source, `O` sink.
+Mirrors `transform_multi_multi_io`. Fully general: ASource dispatch + ASink dispatch.
+"""
+space_transform_i_o!(s::Space, pat::MORK.Expr, tpl::MORK.Expr, add::MORK.Expr) =
+    space_transform_multi_multi!(s, pat, UInt8(0), tpl, UInt8(0), add;
+                                  no_source=false, no_sink=false)
+
 # =====================================================================
 # space_interpret! / space_metta_calculus! — rule evaluation engine
 # =====================================================================
@@ -1033,18 +1078,24 @@ function space_interpret!(s::Space, rt::MORK.Expr) :: Bool
     pat_functor = pat_buf[pat_off + 3]
     tpl_functor = tpl_buf[tpl_off + 3]
 
-    no_source = (pat_functor == UInt8(','))
-    no_sink   = (tpl_functor == UInt8(','))
+    comma = UInt8(',');  i_src = UInt8('I');  o_snk = UInt8('O')
 
-    if !no_source && pat_functor != UInt8('I')
-        return false  # invalid pattern functor
+    # Dispatch to named specialize_io variants — mirrors upstream transform_multi_multi_*
+    # dispatch table in interpret() / space.rs:1699
+    if pat_functor == comma && tpl_functor == comma
+        space_transform_comma_comma!(s, pat_expr, tpl_expr, rt)   # `,` / `,` — most common
+    elseif pat_functor == i_src && tpl_functor == comma
+        space_transform_multi_multi!(s, pat_expr, pat_ee.v, tpl_expr, tpl_ee.v, rt;
+                                      no_source=false, no_sink=true)  # `I` / `,`
+    elseif pat_functor == comma && tpl_functor == o_snk
+        space_transform_multi_multi!(s, pat_expr, pat_ee.v, tpl_expr, tpl_ee.v, rt;
+                                      no_source=true, no_sink=false)  # `,` / `O`
+    elseif pat_functor == i_src && tpl_functor == o_snk
+        space_transform_multi_multi!(s, pat_expr, pat_ee.v, tpl_expr, tpl_ee.v, rt;
+                                      no_source=false, no_sink=false) # `I` / `O`
+    else
+        return false  # invalid functor combination
     end
-    if !no_sink && tpl_functor != UInt8('O')
-        return false  # invalid template functor
-    end
-
-    space_transform_multi_multi!(s, pat_expr, pat_ee.v, tpl_expr, tpl_ee.v, rt;
-                                  no_source=no_source, no_sink=no_sink)
     true
 end
 
@@ -1420,6 +1471,8 @@ export BreakQuery, space_query_multi, space_query_multi_i, _space_query_multi_in
 export space_query_coref, _coreferential_transition!
 export _var_children, _size_children, _arity_children
 export space_transform_multi_multi!
+export space_transform_comma_comma!, space_transform_i_comma!
+export space_transform_comma_o!, space_transform_i_o!
 export space_interpret!, space_metta_calculus!
 export space_sexpr_to_expr, space_metta_calculus_at!, space_acquire_transform_permissions
 

@@ -4076,4 +4076,7 @@ const PM = PathMap.PathMap
         @test n_path == 2   # 0→2, 1→3
     end
 
+    # ── Wiki example programs ─────────────────────────────────────────────────
+    include("integration/test_wiki_examples.jl")
+
 end
