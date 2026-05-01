@@ -527,6 +527,20 @@ space_query_multi(s::Space, pat::MORK.Expr, f::Function) =
 #   references — path-length offsets for De Bruijn NewVar bindings
 #   When stack is empty, f(loc) is called (a match has been found).
 
+# Helpers: iterate child bytes filtered by tag category.
+# SPACE_VARS/SIZES/ARITIES are NTuple{4,UInt64}, not ByteMask — can't use & directly.
+# Instead filter child bytes by tag after byte_item dispatch.
+@inline function _var_children(loc::ReadZipperCore)
+    filter(b -> begin t = byte_item(b); t isa ExprNewVar || t isa ExprVarRef end,
+           collect(zipper_child_mask(loc)))
+end
+@inline function _size_children(loc::ReadZipperCore)
+    filter(b -> byte_item(b) isa ExprSymbol, collect(zipper_child_mask(loc)))
+end
+@inline function _arity_children(loc::ReadZipperCore)
+    filter(b -> byte_item(b) isa ExprArity, collect(zipper_child_mask(loc)))
+end
+
 """
     _coreferential_transition!(loc, stack, references, f)
 
@@ -555,7 +569,7 @@ function _coreferential_transition!(loc::ReadZipperCore,
         end
 
         # Recurse over all variable-tagged child bytes
-        m_vars = Base.and(zipper_child_mask(loc), SPACE_VARS)
+        m_vars = _var_children(loc)
         for b in m_vars
             zipper_descend_to_byte!(loc, b)
             _coreferential_transition!(loc, stack, references, f)
@@ -563,7 +577,7 @@ function _coreferential_transition!(loc::ReadZipperCore,
         end
 
         # Recurse over all SymbolSize children (each is a k-path)
-        m_sizes = Base.and(zipper_child_mask(loc), SPACE_SIZES)
+        m_sizes = _size_children(loc)
         for b in m_sizes
             tag_s = byte_item(b)
             tag_s isa ExprSymbol || continue
@@ -579,7 +593,7 @@ function _coreferential_transition!(loc::ReadZipperCore,
         end
 
         # Recurse over all Arity children — push N fresh NewVar frames
-        m_arities = Base.and(zipper_child_mask(loc), SPACE_ARITIES)
+        m_arities = _arity_children(loc)
         static_nv = item_byte(ExprNewVar())
         for b in m_arities
             tag_a = byte_item(b)
@@ -616,7 +630,7 @@ function _coreferential_transition!(loc::ReadZipperCore,
         push!(stack, new_ee)
 
         # Recurse over variable children
-        m_vars = Base.and(zipper_child_mask(loc), SPACE_VARS)
+        m_vars = _var_children(loc)
         for b in m_vars
             zipper_descend_to_byte!(loc, b)
             _coreferential_transition!(loc, stack, references, f)
@@ -629,7 +643,7 @@ function _coreferential_transition!(loc::ReadZipperCore,
     elseif tag isa ExprSymbol
         size = Int(tag.size)
         # Recurse over variable children first (they can match anything)
-        m_vars = Base.and(zipper_child_mask(loc), SPACE_VARS)
+        m_vars = _var_children(loc)
         for b in m_vars
             zipper_descend_to_byte!(loc, b)
             _coreferential_transition!(loc, stack, references, f)
@@ -647,7 +661,7 @@ function _coreferential_transition!(loc::ReadZipperCore,
     elseif tag isa ExprArity
         arity = Int(tag.arity)
         # Recurse over variable children first
-        m_vars = Base.and(zipper_child_mask(loc), SPACE_VARS)
+        m_vars = _var_children(loc)
         for b in m_vars
             zipper_descend_to_byte!(loc, b)
             _coreferential_transition!(loc, stack, references, f)
@@ -669,14 +683,19 @@ function _coreferential_transition!(loc::ReadZipperCore,
 end
 
 """
-    space_query_coref(btm, pat_expr, effect) → Int
+    space_query_coref(btm, pat_expr, pat_v, effect) → Int
 
 DFS coreferential query — the `no_search=false` path from space.rs.
-More efficient than ProductZipper for patterns with shared variables:
-explores only trie branches consistent with variable bindings.
 
-Calls `effect(loc)` for each match, where `loc` is the ReadZipper
-positioned at the end of the matched expression.
+For SINGLE-SOURCE patterns: uses `_coreferential_transition!` DFS which
+tracks variable bindings during trie traversal, skipping inconsistent
+branches.  More efficient than ProductZipper when variables are shared
+within one pattern (e.g. `(edge \$x \$x)` — self-loops only).
+
+For MULTI-SOURCE patterns: falls back to `space_query_multi` (ProductZipper).
+True multi-source DFS requires the `ZipperProduct` interface from upstream
+space.rs `query_multi_raw` — that port is a TODO (requires adapting
+`_coreferential_transition!` to operate on a ProductZipper, not a ReadZipperCore).
 
 Mirrors `query_multi_raw` DFS path (space.rs:1207–1270).
 """
@@ -696,18 +715,31 @@ function space_query_coref(btm::PathMap{UnitVal},
 
     pat_args = ExprEnv[]
     ee_args!(ExprEnv(UInt8(0), pat_v, UInt32(0), pat_expr), pat_args)
-    # sources reversed — DFS pops LIFO, so last source should be on top
-    sources   = reverse(pat_args[2:end])
-    stack     = Vector{ExprEnv}(sources)
-    references = Int[]
-    count      = Ref(0)
+    sources = pat_args[2:end]
 
-    loc = read_zipper(btm)
-    _coreferential_transition!(loc, stack, references, function(z)
+    if length(sources) == 1
+        # Single source: use coreferential DFS (handles shared variables correctly)
+        stack      = [sources[1]]
+        references = Int[]
+        count      = Ref(0)
+        loc        = read_zipper(btm)
+        _coreferential_transition!(loc, stack, references, function(z)
+            count[] += 1
+            effect(z)
+        end)
+        return count[]
+    end
+
+    # Multi-source: fall back to ProductZipper (TODO: port ZipperProduct DFS)
+    # True multi-source coref DFS needs ProductZipper as loc in
+    # _coreferential_transition! — mirrors upstream query_multi_raw(prz, sources, ...)
+    # where prz is a ZipperProduct, not a ReadZipperCore.
+    count = Ref(0)
+    space_query_multi(btm, pat_expr, pat_v, (bindings, expr) -> begin
         count[] += 1
-        effect(z)
+        effect(nothing)   # loc not available in fallback path
+        true
     end)
-
     count[]
 end
 
@@ -1327,6 +1359,7 @@ export space_backup_symbols, space_restore_symbols!
 export space_prefix_subsumption, space_token_bfs, space_load_csv!
 export BreakQuery, space_query_multi, space_query_multi_i, _space_query_multi_inner!
 export space_query_coref, _coreferential_transition!
+export _var_children, _size_children, _arity_children
 export space_transform_multi_multi!
 export space_interpret!, space_metta_calculus!
 export space_sexpr_to_expr, space_metta_calculus_at!, space_acquire_transform_permissions

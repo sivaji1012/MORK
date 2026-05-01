@@ -4052,32 +4052,28 @@ const PM = PathMap.PathMap
     # space_query_coref — coreferential DFS query
     # ==================================================================
 
-    @testset "space_query_coref — 2-source chain matches ProductZipper" begin
-        # (edge $x $y) (edge $y $z) → (path $x $z)
+    @testset "space_query_coref — single source with shared variable" begin
+        # (edge $x $x) — self-loops: DFS correctly skips non-self-loops
+        s = new_space()
+        space_add_all_sexpr!(s, "(edge 0 0) (edge 1 2) (edge 3 3)")
+        prog = raw"(exec 0 (, (edge $x $x)) (, (loop $x)))"
+        space_add_all_sexpr!(s, prog)
+        space_metta_calculus!(s, typemax(Int))
+        out = space_dump_all_sexpr(s)
+        n_loop = count(l -> occursin("(loop", l), split(out, "\n"))
+        @test n_loop == 2   # only (edge 0 0) and (edge 3 3)
+    end
+
+    @testset "space_query_coref — multi-source falls back to ProductZipper" begin
+        # Multi-source: falls back to space_query_multi, results match
         s = new_space()
         space_add_all_sexpr!(s, "(edge 0 1) (edge 1 2) (edge 2 3)")
-
-        # Build pattern: (exec 0 (, (edge $x $y) (edge $y $z)) (, (path $x $z)))
         prog = raw"(exec 0 (, (edge $x $y) (edge $y $z)) (, (path $x $z)))"
         space_add_all_sexpr!(s, prog)
         space_metta_calculus!(s, typemax(Int))
-
         out = space_dump_all_sexpr(s)
         n_path = count(l -> occursin("(path", l), split(out, "\n"))
         @test n_path == 2   # 0→2, 1→3
-    end
-
-    @testset "space_query_coref — single source passes through" begin
-        btm = new_space().btm
-        space_add_all_sexpr!(new_space(), "(a 1)")   # warm up
-
-        s = new_space()
-        space_add_all_sexpr!(s, "(a 1) (a 2)")
-        prog = raw"(exec 0 (, (a $x)) (, (b $x)))"
-        space_add_all_sexpr!(s, prog)
-        space_metta_calculus!(s, typemax(Int))
-        out = space_dump_all_sexpr(s)
-        @test count(l -> occursin("(b", l), split(out, "\n")) == 2
     end
 
 end
