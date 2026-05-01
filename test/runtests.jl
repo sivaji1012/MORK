@@ -2583,6 +2583,36 @@ const PM = PathMap.PathMap
             @test get_val_at(m, collect(UInt8, "a")) !== nothing
         end
 
+        @testset "wz_join_k_path_into! — drop first 2 bytes" begin
+            m = PM{V}()
+            set_val_at!(m, UInt8[0x01, 0x02, 0x03], V(1))
+            set_val_at!(m, UInt8[0x01, 0x02, 0x04], V(2))
+            z   = write_zipper(m)
+            res = wz_join_k_path_into!(z, 2)
+            @test res == true
+            # After dropping 2 bytes, only 0x03 and 0x04 remain
+            n = 0; rz = read_zipper(m)
+            while zipper_to_next_val!(rz); n += 1 end
+            @test n == 2
+        end
+
+        @testset "wz_join_k_path_into! — empty subtrie returns false + prunes" begin
+            m  = PM{V}()
+            set_val_at!(m, UInt8[0xAA], V(1))
+            z  = write_zipper(m)
+            wz_descend_to!(z, UInt8[0xBB])   # no paths here
+            res = wz_join_k_path_into!(z, 1, true)
+            @test res == false
+        end
+
+        @testset "wz_restricting! — empty src returns false" begin
+            m = PM{V}()
+            set_val_at!(m, collect(UInt8, "abc"), V(1))
+            z   = write_zipper(m)
+            res = wz_restricting!(z, ANRNone{V, GlobalAlloc}())
+            @test res == false
+        end
+
         # ==================================================================
         # WriteZipper completion — prune, remove_branches, create_path, etc.
         # ==================================================================
@@ -4017,5 +4047,37 @@ const PM = PathMap.PathMap
         end
 
     end   # MORK new sinks
+
+    # ==================================================================
+    # space_query_coref — coreferential DFS query
+    # ==================================================================
+
+    @testset "space_query_coref — 2-source chain matches ProductZipper" begin
+        # (edge $x $y) (edge $y $z) → (path $x $z)
+        s = new_space()
+        space_add_all_sexpr!(s, "(edge 0 1) (edge 1 2) (edge 2 3)")
+
+        # Build pattern: (exec 0 (, (edge $x $y) (edge $y $z)) (, (path $x $z)))
+        prog = raw"(exec 0 (, (edge $x $y) (edge $y $z)) (, (path $x $z)))"
+        space_add_all_sexpr!(s, prog)
+        space_metta_calculus!(s, typemax(Int))
+
+        out = space_dump_all_sexpr(s)
+        n_path = count(l -> occursin("(path", l), split(out, "\n"))
+        @test n_path == 2   # 0→2, 1→3
+    end
+
+    @testset "space_query_coref — single source passes through" begin
+        btm = new_space().btm
+        space_add_all_sexpr!(new_space(), "(a 1)")   # warm up
+
+        s = new_space()
+        space_add_all_sexpr!(s, "(a 1) (a 2)")
+        prog = raw"(exec 0 (, (a $x)) (, (b $x)))"
+        space_add_all_sexpr!(s, prog)
+        space_metta_calculus!(s, typemax(Int))
+        out = space_dump_all_sexpr(s)
+        @test count(l -> occursin("(b", l), split(out, "\n")) == 2
+    end
 
 end

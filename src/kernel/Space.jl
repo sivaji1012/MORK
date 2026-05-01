@@ -505,6 +505,218 @@ end
 space_query_multi(s::Space, pat::MORK.Expr, f::Function) =
     space_query_multi(s.btm, pat, f)
 
+# =====================================================================
+# coreferential_transition — DFS query (the no_search=false path)
+# =====================================================================
+#
+# Mirrors `coreferential_transition` in space.rs (lines 92–212).
+#
+# This is the alternative to ProductZipper for multi-source queries.
+# Instead of generating the full Cartesian product then filtering via
+# unify, this DFS tracks variable bindings DURING trie traversal:
+#
+#   ProductZipper (current):  O(K^N) candidates → filter → O(M) matches
+#   Coreferential DFS:        O(M × depth) — explores only consistent paths
+#
+# When the same variable appears in multiple sources, the DFS records
+# the trie path length at first binding (references[i]) and on VarRef
+# descends directly to that sub-path — skipping all inconsistent branches.
+#
+# Algorithm (mirrors Rust recursive DFS):
+#   stack  — remaining ExprEnv items to match (popped LIFO)
+#   references — path-length offsets for De Bruijn NewVar bindings
+#   When stack is empty, f(loc) is called (a match has been found).
+
+"""
+    _coreferential_transition!(loc, stack, references, f)
+
+Recursive DFS that explores the trie `loc` matching `stack` of ExprEnvs.
+Calls `f(loc)` for each complete match (empty stack).
+Mirrors `coreferential_transition` in space.rs.
+"""
+function _coreferential_transition!(loc::ReadZipperCore,
+                                     stack::Vector{ExprEnv},
+                                     references::Vector{Int},
+                                     f::Function)
+    if isempty(stack)
+        f(loc)
+        return
+    end
+
+    e = pop!(stack)
+    e_byte = e.base.buf[Int(e.offset) + 1]
+
+    tag = byte_item(e_byte)
+
+    if tag isa ExprNewVar
+        # NewVar: first occurrence records current path length
+        if e.n == 0
+            push!(references, length(zipper_path(loc)))
+        end
+
+        # Recurse over all variable-tagged child bytes
+        m_vars = Base.and(zipper_child_mask(loc), SPACE_VARS)
+        for b in m_vars
+            zipper_descend_to_byte!(loc, b)
+            _coreferential_transition!(loc, stack, references, f)
+            zipper_ascend_byte!(loc)
+        end
+
+        # Recurse over all SymbolSize children (each is a k-path)
+        m_sizes = Base.and(zipper_child_mask(loc), SPACE_SIZES)
+        for b in m_sizes
+            tag_s = byte_item(b)
+            tag_s isa ExprSymbol || continue
+            size  = Int(tag_s.size)
+            zipper_descend_to_byte!(loc, b)
+            if zipper_descend_first_k_path!(loc, size)
+                while true
+                    _coreferential_transition!(loc, stack, references, f)
+                    zipper_to_next_k_path!(loc, size) || break
+                end
+            end
+            zipper_ascend_byte!(loc)
+        end
+
+        # Recurse over all Arity children — push N fresh NewVar frames
+        m_arities = Base.and(zipper_child_mask(loc), SPACE_ARITIES)
+        static_nv = item_byte(ExprNewVar())
+        for b in m_arities
+            tag_a = byte_item(b)
+            tag_a isa ExprArity || continue
+            arity = Int(tag_a.arity)
+            zipper_descend_to_byte!(loc, b)
+            ol = length(stack)
+            nv_expr = MORK.Expr([static_nv])
+            for _ in 1:arity
+                push!(stack, ExprEnv(UInt8(255), UInt8(0), UInt32(0), nv_expr))
+            end
+            _coreferential_transition!(loc, stack, references, f)
+            resize!(stack, ol)
+            zipper_ascend_byte!(loc)
+        end
+
+        e.n == 0 && pop!(references)
+
+    elseif tag isa ExprVarRef
+        i = Int(tag.idx)   # De Bruijn index
+
+        new_ee = if e.n == 0 && i < length(references)
+            # Resolve: push ExprEnv pointing into current path at recorded offset
+            ref_off = references[i + 1]   # 1-based Julia indexing
+            path    = zipper_path(loc)
+            resolved_buf = Vector{UInt8}(path[ref_off + 1 : end])
+            ExprEnv(UInt8(254), UInt8(0), UInt32(0), MORK.Expr(resolved_buf))
+        else
+            # Out-of-scope VarRef → treat as fresh NewVar (any match)
+            static_nv = item_byte(ExprNewVar())
+            ExprEnv(UInt8(255), UInt8(0), UInt32(0), MORK.Expr([static_nv]))
+        end
+
+        push!(stack, new_ee)
+
+        # Recurse over variable children
+        m_vars = Base.and(zipper_child_mask(loc), SPACE_VARS)
+        for b in m_vars
+            zipper_descend_to_byte!(loc, b)
+            _coreferential_transition!(loc, stack, references, f)
+            zipper_ascend_byte!(loc)
+        end
+
+        _coreferential_transition!(loc, stack, references, f)
+        pop!(stack)
+
+    elseif tag isa ExprSymbol
+        size = Int(tag.size)
+        # Recurse over variable children first (they can match anything)
+        m_vars = Base.and(zipper_child_mask(loc), SPACE_VARS)
+        for b in m_vars
+            zipper_descend_to_byte!(loc, b)
+            _coreferential_transition!(loc, stack, references, f)
+            zipper_ascend_byte!(loc)
+        end
+        # Then try exact symbol descent
+        if zipper_descend_to_existing_byte!(loc, e_byte)
+            sym_bytes = e.base.buf[Int(e.offset) + 2 : Int(e.offset) + 1 + size]
+            if zipper_descend_to_check!(loc, sym_bytes)
+                _coreferential_transition!(loc, stack, references, f)
+            end
+            zipper_ascend!(loc, size + 1)
+        end
+
+    elseif tag isa ExprArity
+        arity = Int(tag.arity)
+        # Recurse over variable children first
+        m_vars = Base.and(zipper_child_mask(loc), SPACE_VARS)
+        for b in m_vars
+            zipper_descend_to_byte!(loc, b)
+            _coreferential_transition!(loc, stack, references, f)
+            zipper_ascend_byte!(loc)
+        end
+        # Then try exact arity descent
+        if zipper_descend_to_existing_byte!(loc, e_byte)
+            ol = length(stack)
+            ee_args!(e, stack)
+            # Reverse the args (Rust reverses before push)
+            reverse!(view(stack, ol+1:length(stack)))
+            _coreferential_transition!(loc, stack, references, f)
+            resize!(stack, ol)
+            zipper_ascend_byte!(loc)
+        end
+    end
+
+    push!(stack, e)
+end
+
+"""
+    space_query_coref(btm, pat_expr, effect) → Int
+
+DFS coreferential query — the `no_search=false` path from space.rs.
+More efficient than ProductZipper for patterns with shared variables:
+explores only trie branches consistent with variable bindings.
+
+Calls `effect(loc)` for each match, where `loc` is the ReadZipper
+positioned at the end of the matched expression.
+
+Mirrors `query_multi_raw` DFS path (space.rs:1207–1270).
+"""
+function space_query_coref(btm::PathMap{UnitVal},
+                            pat_expr::MORK.Expr,
+                            pat_v::UInt8,
+                            effect::Function) :: Int
+    pat_tag = byte_item(pat_expr.buf[1])
+    pat_tag isa ExprArity || return 0
+    n_factors = Int(pat_tag.arity)
+    n_factors > 0 || return 0
+
+    if n_factors == 1
+        effect(nothing)
+        return 1
+    end
+
+    pat_args = ExprEnv[]
+    ee_args!(ExprEnv(UInt8(0), pat_v, UInt32(0), pat_expr), pat_args)
+    # sources reversed — DFS pops LIFO, so last source should be on top
+    sources   = reverse(pat_args[2:end])
+    stack     = Vector{ExprEnv}(sources)
+    references = Int[]
+    count      = Ref(0)
+
+    loc = read_zipper(btm)
+    _coreferential_transition!(loc, stack, references, function(z)
+        count[] += 1
+        effect(z)
+    end)
+
+    count[]
+end
+
+space_query_coref(btm::PathMap{UnitVal}, pat::MORK.Expr, f::Function) =
+    space_query_coref(btm, pat, UInt8(0), f)
+
+space_query_coref(s::Space, pat::MORK.Expr, f::Function) =
+    space_query_coref(s.btm, pat, UInt8(0), f)
+
 # Space-level overloads that pass mmaps for ACT file caching
 space_query_multi_i(s::Space, pat::MORK.Expr, f::Function) =
     space_query_multi_i(s.btm, pat, UInt8(0), f; mmaps=s.mmaps)
@@ -1114,6 +1326,7 @@ end
 export space_backup_symbols, space_restore_symbols!
 export space_prefix_subsumption, space_token_bfs, space_load_csv!
 export BreakQuery, space_query_multi, space_query_multi_i, _space_query_multi_inner!
+export space_query_coref, _coreferential_transition!
 export space_transform_multi_multi!
 export space_interpret!, space_metta_calculus!
 export space_sexpr_to_expr, space_metta_calculus_at!, space_acquire_transform_permissions
