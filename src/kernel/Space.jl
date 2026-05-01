@@ -527,19 +527,62 @@ space_query_multi(s::Space, pat::MORK.Expr, f::Function) =
 #   references — path-length offsets for De Bruijn NewVar bindings
 #   When stack is empty, f(loc) is called (a match has been found).
 
-# Helpers: iterate child bytes filtered by tag category.
-# SPACE_VARS/SIZES/ARITIES are NTuple{4,UInt64}, not ByteMask — can't use & directly.
-# Instead filter child bytes by tag after byte_item dispatch.
-@inline function _var_children(loc::ReadZipperCore)
-    filter(b -> begin t = byte_item(b); t isa ExprNewVar || t isa ExprVarRef end,
-           collect(zipper_child_mask(loc)))
+# ── Zipper-type-agnostic helpers for _coreferential_transition! ───────────────
+# These dispatch on both ReadZipperCore (single-source) and ProductZipper
+# (multi-source), allowing one DFS implementation for both paths.
+
+@inline _coref_child_mask(loc::ReadZipperCore)  = zipper_child_mask(loc)
+@inline _coref_child_mask(loc::ProductZipper)   = pz_child_mask(loc)
+
+@inline _coref_path(loc::ReadZipperCore) = zipper_path(loc)
+@inline _coref_path(loc::ProductZipper)  = pz_path(loc)
+
+@inline _coref_descend_byte!(loc::ReadZipperCore, b::UInt8) = zipper_descend_to_byte!(loc, b)
+@inline _coref_descend_byte!(loc::ProductZipper,  b::UInt8) = pz_descend_to_byte!(loc, b)
+
+@inline _coref_ascend_byte!(loc::ReadZipperCore) = zipper_ascend_byte!(loc)
+@inline _coref_ascend_byte!(loc::ProductZipper)  = pz_ascend_byte!(loc)
+
+@inline _coref_ascend!(loc::ReadZipperCore, n::Int) = zipper_ascend!(loc, n)
+@inline _coref_ascend!(loc::ProductZipper,  n::Int) = pz_ascend!(loc, n)
+
+@inline function _coref_descend_to_existing_byte!(loc::ReadZipperCore, b::UInt8)
+    zipper_descend_to_existing_byte!(loc, b)
 end
-@inline function _size_children(loc::ReadZipperCore)
-    filter(b -> byte_item(b) isa ExprSymbol, collect(zipper_child_mask(loc)))
+@inline function _coref_descend_to_existing_byte!(loc::ProductZipper, b::UInt8)
+    pz_descend_to_existing_byte!(loc, b)
 end
-@inline function _arity_children(loc::ReadZipperCore)
-    filter(b -> byte_item(b) isa ExprArity, collect(zipper_child_mask(loc)))
+
+@inline function _coref_descend_to_check!(loc::ReadZipperCore, bytes)
+    zipper_descend_to_check!(loc, bytes)
 end
+@inline function _coref_descend_to_check!(loc::ProductZipper, bytes)
+    pz_descend_to_check!(loc, bytes)
+end
+
+@inline function _coref_descend_first_k_path!(loc::ReadZipperCore, k::Int)
+    zipper_descend_first_k_path!(loc, k)
+end
+@inline function _coref_descend_first_k_path!(loc::ProductZipper, k::Int)
+    pz_descend_first_k_path!(loc, k)
+end
+
+@inline function _coref_to_next_k_path!(loc::ReadZipperCore, k::Int)
+    zipper_to_next_k_path!(loc, k)
+end
+@inline function _coref_to_next_k_path!(loc::ProductZipper, k::Int)
+    pz_to_next_k_path!(loc, k)
+end
+
+# Filtered child lists using precomputed bitmasks — avoids calling byte_item on
+# content bytes (0x40-0x7F are reserved and throw; e.g. 'e' = 0x65 from "edge").
+# SPACE_VARS/SIZES/ARITIES are NTuple{4,UInt64}: bucket = (b>>6)+1, bit = b&0x3F.
+@inline _in_mask(mask::NTuple{4,UInt64}, b::UInt8) =
+    ((mask[Int(b >> 6) + 1] >> Int(b & 0x3F)) & UInt64(1)) != UInt64(0)
+
+@inline _var_children(loc)   = filter(b -> _in_mask(SPACE_VARS,   b), collect(_coref_child_mask(loc)))
+@inline _size_children(loc)  = filter(b -> _in_mask(SPACE_SIZES,  b), collect(_coref_child_mask(loc)))
+@inline _arity_children(loc) = filter(b -> _in_mask(SPACE_ARITIES,b), collect(_coref_child_mask(loc)))
 
 """
     _coreferential_transition!(loc, stack, references, f)
@@ -548,7 +591,7 @@ Recursive DFS that explores the trie `loc` matching `stack` of ExprEnvs.
 Calls `f(loc)` for each complete match (empty stack).
 Mirrors `coreferential_transition` in space.rs.
 """
-function _coreferential_transition!(loc::ReadZipperCore,
+function _coreferential_transition!(loc,   # ReadZipperCore (single) or ProductZipper (multi)
                                      stack::Vector{ExprEnv},
                                      references::Vector{Int},
                                      f::Function)
@@ -563,43 +606,39 @@ function _coreferential_transition!(loc::ReadZipperCore,
     tag = byte_item(e_byte)
 
     if tag isa ExprNewVar
-        # NewVar: first occurrence records current path length
         if e.n == 0
-            push!(references, length(zipper_path(loc)))
+            push!(references, length(_coref_path(loc)))
         end
 
-        # Recurse over all variable-tagged child bytes
         m_vars = _var_children(loc)
         for b in m_vars
-            zipper_descend_to_byte!(loc, b)
+            _coref_descend_byte!(loc, b)
             _coreferential_transition!(loc, stack, references, f)
-            zipper_ascend_byte!(loc)
+            _coref_ascend_byte!(loc)
         end
 
-        # Recurse over all SymbolSize children (each is a k-path)
         m_sizes = _size_children(loc)
         for b in m_sizes
             tag_s = byte_item(b)
             tag_s isa ExprSymbol || continue
             size  = Int(tag_s.size)
-            zipper_descend_to_byte!(loc, b)
-            if zipper_descend_first_k_path!(loc, size)
+            _coref_descend_byte!(loc, b)
+            if _coref_descend_first_k_path!(loc, size)
                 while true
                     _coreferential_transition!(loc, stack, references, f)
-                    zipper_to_next_k_path!(loc, size) || break
+                    _coref_to_next_k_path!(loc, size) || break
                 end
             end
-            zipper_ascend_byte!(loc)
+            _coref_ascend_byte!(loc)
         end
 
-        # Recurse over all Arity children — push N fresh NewVar frames
         m_arities = _arity_children(loc)
         static_nv = item_byte(ExprNewVar())
         for b in m_arities
             tag_a = byte_item(b)
             tag_a isa ExprArity || continue
             arity = Int(tag_a.arity)
-            zipper_descend_to_byte!(loc, b)
+            _coref_descend_byte!(loc, b)
             ol = length(stack)
             nv_expr = MORK.Expr([static_nv])
             for _ in 1:arity
@@ -607,75 +646,64 @@ function _coreferential_transition!(loc::ReadZipperCore,
             end
             _coreferential_transition!(loc, stack, references, f)
             resize!(stack, ol)
-            zipper_ascend_byte!(loc)
+            _coref_ascend_byte!(loc)
         end
 
         e.n == 0 && pop!(references)
 
     elseif tag isa ExprVarRef
-        i = Int(tag.idx)   # De Bruijn index
-
+        i = Int(tag.idx)
         new_ee = if e.n == 0 && i < length(references)
-            # Resolve: push ExprEnv pointing into current path at recorded offset
-            ref_off = references[i + 1]   # 1-based Julia indexing
-            path    = zipper_path(loc)
+            ref_off      = references[i + 1]
+            path         = _coref_path(loc)
             resolved_buf = Vector{UInt8}(path[ref_off + 1 : end])
             ExprEnv(UInt8(254), UInt8(0), UInt32(0), MORK.Expr(resolved_buf))
         else
-            # Out-of-scope VarRef → treat as fresh NewVar (any match)
             static_nv = item_byte(ExprNewVar())
             ExprEnv(UInt8(255), UInt8(0), UInt32(0), MORK.Expr([static_nv]))
         end
 
         push!(stack, new_ee)
-
-        # Recurse over variable children
         m_vars = _var_children(loc)
         for b in m_vars
-            zipper_descend_to_byte!(loc, b)
+            _coref_descend_byte!(loc, b)
             _coreferential_transition!(loc, stack, references, f)
-            zipper_ascend_byte!(loc)
+            _coref_ascend_byte!(loc)
         end
-
         _coreferential_transition!(loc, stack, references, f)
         pop!(stack)
 
     elseif tag isa ExprSymbol
-        size = Int(tag.size)
-        # Recurse over variable children first (they can match anything)
+        size   = Int(tag.size)
         m_vars = _var_children(loc)
         for b in m_vars
-            zipper_descend_to_byte!(loc, b)
+            _coref_descend_byte!(loc, b)
             _coreferential_transition!(loc, stack, references, f)
-            zipper_ascend_byte!(loc)
+            _coref_ascend_byte!(loc)
         end
-        # Then try exact symbol descent
-        if zipper_descend_to_existing_byte!(loc, e_byte)
+        if _coref_descend_to_existing_byte!(loc, e_byte)
             sym_bytes = e.base.buf[Int(e.offset) + 2 : Int(e.offset) + 1 + size]
-            if zipper_descend_to_check!(loc, sym_bytes)
+            if _coref_descend_to_check!(loc, sym_bytes)
                 _coreferential_transition!(loc, stack, references, f)
             end
-            zipper_ascend!(loc, size + 1)
+            _coref_ascend!(loc, size + 1)
         end
 
     elseif tag isa ExprArity
         arity = Int(tag.arity)
-        # Recurse over variable children first
         m_vars = _var_children(loc)
         for b in m_vars
-            zipper_descend_to_byte!(loc, b)
+            _coref_descend_byte!(loc, b)
             _coreferential_transition!(loc, stack, references, f)
-            zipper_ascend_byte!(loc)
+            _coref_ascend_byte!(loc)
         end
-        # Then try exact arity descent
-        if zipper_descend_to_existing_byte!(loc, e_byte)
+        if _coref_descend_to_existing_byte!(loc, e_byte)
             ol = length(stack)
             ee_args!(e, stack)
-            # Reverse the args (Rust reverses before push)
             reverse!(view(stack, ol+1:length(stack)))
             _coreferential_transition!(loc, stack, references, f)
             resize!(stack, ol)
-            zipper_ascend_byte!(loc)
+            _coref_ascend_byte!(loc)
         end
     end
 
@@ -685,17 +713,15 @@ end
 """
     space_query_coref(btm, pat_expr, pat_v, effect) → Int
 
-DFS coreferential query — the `no_search=false` path from space.rs.
+DFS coreferential query — mirrors `query_multi_raw` in space.rs.
 
-For SINGLE-SOURCE patterns: uses `_coreferential_transition!` DFS which
-tracks variable bindings during trie traversal, skipping inconsistent
-branches.  More efficient than ProductZipper when variables are shared
-within one pattern (e.g. `(edge \$x \$x)` — self-loops only).
+For all N sources: uses `_coreferential_transition!` DFS on a ProductZipper.
+The DFS tracks variable bindings during product-trie traversal, pruning
+inconsistent branches.  At each leaf, runs unification to produce bindings.
 
-For MULTI-SOURCE patterns: falls back to `space_query_multi` (ProductZipper).
-True multi-source DFS requires the `ZipperProduct` interface from upstream
-space.rs `query_multi_raw` — that port is a TODO (requires adapting
-`_coreferential_transition!` to operate on a ProductZipper, not a ReadZipperCore).
+This is more efficient than ProductZipper + post-filter when variables are
+shared across sources (e.g. `(edge \$x \$y)(edge \$y \$z)` — binding `\$y`
+from source 1 constrains which paths source 2 explores).
 
 Mirrors `query_multi_raw` DFS path (space.rs:1207–1270).
 """
@@ -715,10 +741,12 @@ function space_query_coref(btm::PathMap{UnitVal},
 
     pat_args = ExprEnv[]
     ee_args!(ExprEnv(UInt8(0), pat_v, UInt32(0), pat_expr), pat_args)
-    sources = pat_args[2:end]
+    sources = pat_args[2:end]   # one ExprEnv per source pattern
 
-    if length(sources) == 1
-        # Single source: use coreferential DFS (handles shared variables correctly)
+    n_src = length(sources)
+
+    if n_src == 1
+        # Single source: plain ReadZipperCore DFS
         stack      = [sources[1]]
         references = Int[]
         count      = Ref(0)
@@ -730,16 +758,47 @@ function space_query_coref(btm::PathMap{UnitVal},
         return count[]
     end
 
-    # Multi-source: fall back to ProductZipper (TODO: port ZipperProduct DFS)
-    # True multi-source coref DFS needs ProductZipper as loc in
-    # _coreferential_transition! — mirrors upstream query_multi_raw(prz, sources, ...)
-    # where prz is a ZipperProduct, not a ReadZipperCore.
-    count = Ref(0)
-    space_query_multi(btm, pat_expr, pat_v, (bindings, expr) -> begin
-        count[] += 1
-        effect(nothing)   # loc not available in fallback path
-        true
+    # Multi-source: ProductZipper DFS — mirrors query_multi_raw(prz, sources, f)
+    # Build ProductZipper: primary = btm, secondaries = (n_src-1) copies of btm
+    primary     = read_zipper_at_path(btm, UInt8[])
+    secondaries = [read_zipper_at_path(btm, UInt8[]) for _ in 2:n_src]
+    prz         = ProductZipper(primary, secondaries)
+
+    # Stack: sources in reverse (LIFO — first source on top)
+    stack      = reverse(collect(sources))
+    references = Int[]
+    count      = Ref(0)
+    pairs_scratch    = Tuple{ExprEnv, ExprEnv}[]
+    bindings_scratch = Dict{ExprVar, ExprEnv}()
+
+    _coreferential_transition!(prz, stack, references, function(loc)
+        # Reconstruct source expressions from the combined path + factor boundaries
+        combined = collect(pz_path(loc))
+        fps      = loc.factor_paths   # path-length boundaries between factors
+
+        empty!(pairs_scratch)
+        boundaries = vcat(0, fps, length(combined))
+        for (k, src) in enumerate(sources)
+            lo = boundaries[k] + 1
+            hi = boundaries[k + 1]
+            (lo > hi || lo > length(combined)) && break
+            expr = MORK.Expr(combined[lo:hi])
+            push!(pairs_scratch, (src, ExprEnv(UInt8(k), UInt8(0), UInt32(0), expr)))
+        end
+
+        length(pairs_scratch) < n_src && return   # incomplete match
+
+        result = _expr_unify_inplace!(pairs_scratch, bindings_scratch)
+        if result === true
+            count[] += 1
+            bindings_out = copy(bindings_scratch)
+            empty!(bindings_scratch)
+            effect(loc)
+        else
+            empty!(bindings_scratch)
+        end
     end)
+
     count[]
 end
 

@@ -242,9 +242,7 @@ version = "2.8.3"
 
 [[deps.PathMap]]
 deps = ["PrecompileTools", "Zlib_jll"]
-git-tree-sha1 = "f9472a63714f0c81cfe034546d9c60a656d27d56"
-repo-rev = "main"
-repo-url = "https://github.com/sivaji1012/PathMap.git"
+path = "../PathMap"
 uuid = "a8b3d4e5-f012-4567-89ab-cdef01234567"
 version = "0.3.0"
 
