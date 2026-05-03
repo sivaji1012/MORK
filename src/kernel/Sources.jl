@@ -9,7 +9,9 @@ Julia translation notes
   - Rust `Source` trait → Julia abstract type `AbstractSource`
   - Rust `AFactor<'trie>` enum (PolyZipper derive) → Union type `AFactorZipper`
   - Rust `gen move` coroutine → regular iterator / Array
-  - Rust `ACTMmapZipper`, `Z3Source`, `CmpSource` → stubbed (not yet ported)
+  - Rust `ACTMmapZipper` → ported as ACTSource + ACTZipper (act_open_mmap)
+  - Rust `CmpSource` → ported with DependentZipper equality/inequality policy
+  - Rust `Z3Source` → skipped (external Z3 dep, Linux-only in upstream)
   - Rust `destruct!` proc-macro → direct byte inspection
   - ResourceRequest/Resource enums → Julia enums/structs
 """

@@ -7,8 +7,9 @@
 # Example: the Aunt query in comments of lib.rs computes aunt relationships
 # from family/people spaces using trie lattice operations.
 #
-# Status: upstream has todo!() in parse_routine_with_args_paths — parser stubs
-# are left as in upstream. VM execution is fully ported.
+# Status: VM execution fully ported and tested (CfIter, Interpreter, run_routine,
+# all trie algebra ops). Text parser intentionally absent — upstream Rust also has
+# todo!() for parse_routine_with_args_paths; routines are built programmatically.
 
 # =====================================================================
 # CfIter — port of cf_iter.rs

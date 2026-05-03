@@ -9,8 +9,10 @@ Julia translation notes
   - Rust `Sink` trait → Julia abstract type `AbstractSink` + functions
   - Rust `WriteZipperTracked` arg → mutating the btm PathMap directly
   - Rust `USink`, `AUSink` (coroutine-based) → iterative
-  - Rust `WASMSink` (wasmtime), `PureSink` (eval-ffi), `Z3Sink` → stubbed
-  - Rust `ACTSink` → stubbed (requires ArenaCompactTree mutation)
+  - Rust `ACTSink` → ported (act_from_zipper + act_save, tested)
+  - Rust `WASMSink` → skipped (external wasmtime dep)
+  - Rust `Z3Sink` → skipped (external Z3 dep, Linux-only in upstream)
+  - Rust `PureSink` (eval-ffi) → skipped (eval-ffi experiment only)
   - `AlgebraicStatus` return from `subtract_into`/`join_into` → Bool
 """
 
