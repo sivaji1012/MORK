@@ -234,56 +234,83 @@ end
 """
     CountSink
 
-Count unique source values per output template, then store the count.
-Mirrors `CountSink` in sinks.rs.
+Count unique source values per output template, then write the result.
+Mirrors `CountSink` in sinks.rs. Three modes from upstream tests:
 
-Accumulating sink: sink_apply! collects sources, sink_finalize! counts and writes.
-Used by space_transform_multi_multi! as a persistent sink (not per-match).
+  1. Fixed guard  — count-var arg is a literal (e.g. `18`):
+       Only emit template if actual count == that literal.
+       Example: `(count (all eighteen) 18 source)` → emits `(all eighteen)` iff count=18
+  2. Variable-embed — count-var arg is a variable AND template contains it:
+       Substitute variable in template with actual count.
+       Example: `(count (all \$k) \$k source)` → emits `(all 3)` for count=3
+  3. Variable-no-embed — count-var is a variable but template has no variables:
+       Always emit template unchanged (count captured but not in result).
+       Example: `(count (all stupid) \$k source)` → always emits `(all stupid)`
 """
 mutable struct CountSink <: AbstractSink
     expr        ::MORK.Expr
-    # Groups: (template_bytes → unique_sources PathMap)
-    # Each template may be different across matches (different outer bindings).
-    by_template ::Vector{Tuple{Vector{UInt8}, PathMap{UnitVal}}}
+    # Groups: (template_bytes, count_var_bytes, unique_sources PathMap)
+    # count_var_bytes = raw bytes of arg3 (literal or variable).
+    by_template ::Vector{Tuple{Vector{UInt8}, Vector{UInt8}, PathMap{UnitVal}}}
 end
 
-CountSink(e::MORK.Expr) = CountSink(e, Tuple{Vector{UInt8}, PathMap{UnitVal}}[])
+CountSink(e::MORK.Expr) =
+    CountSink(e, Tuple{Vector{UInt8}, Vector{UInt8}, PathMap{UnitVal}}[])
 
 function sink_apply!(s::CountSink, bindings::Dict{ExprVar,ExprEnv},
                      path::Vector{UInt8}, btm::PathMap{UnitVal})
-    # path = bound expression bytes: (count <template> <var> <source>)
-    # Parse the 4-arg count expression to extract template and source.
+    # path = bound expression: (count <template> <count-var> <source>)
     length(path) < 7 && return
     args = ExprEnv[]
     ee_args!(ExprEnv(UInt8(0), UInt8(0), UInt32(0), MORK.Expr(path)), args)
     length(args) < 4 && return
 
-    # Extract template bytes (arg2) and source bytes (arg4)
     tpl_start = Int(args[2].offset) + 1
     tpl_end   = _expr_end_offset(path, tpl_start)
     tpl_bytes = path[tpl_start : tpl_end-1]
+
+    # arg3 = count-var or fixed guard value
+    var_start = Int(args[3].offset) + 1
+    var_end   = _expr_end_offset(path, var_start)
+    var_bytes = path[var_start : var_end-1]
 
     src_start = Int(args[4].offset) + 1
     src_end   = _expr_end_offset(path, src_start)
     src_bytes = path[src_start : src_end-1]
 
-    # Find or create the entry for this template
-    entry = findfirst(t -> t[1] == tpl_bytes, s.by_template)
+    # Group by (template, count-var) — both vary with outer variable bindings
+    entry = findfirst(t -> t[1] == tpl_bytes && t[2] == var_bytes, s.by_template)
     if entry === nothing
-        push!(s.by_template, (tpl_bytes, PathMap{UnitVal}()))
+        push!(s.by_template, (tpl_bytes, var_bytes, PathMap{UnitVal}()))
         entry = length(s.by_template)
     end
-    set_val_at!(s.by_template[entry][2], src_bytes, UNIT_VAL)
+    set_val_at!(s.by_template[entry][3], src_bytes, UNIT_VAL)
 end
 
 function sink_finalize!(s::CountSink, btm::PathMap{UnitVal}) :: Bool
     changed = false
-    for (tpl_bytes, sources) in s.by_template
-        cnt     = val_count(sources)
-        cnt_str = string(cnt)
-        cnt_mork = vcat(item_byte(ExprSymbol(UInt8(length(cnt_str)))), Vector{UInt8}(cnt_str))
-        out = _pure_substitute_first_var(tpl_bytes, 1, length(tpl_bytes), cnt_mork)
-        out === nothing && continue
+    for (tpl_bytes, var_bytes, sources) in s.by_template
+        cnt      = val_count(sources)
+        cnt_str  = string(cnt)
+        cnt_mork = vcat(item_byte(ExprSymbol(UInt8(length(cnt_str)))),
+                        Vector{UInt8}(cnt_str))
+
+        # Mode 1 (fixed guard): var_bytes is a literal symbol, not a variable.
+        # Only emit if actual count matches the literal exactly.
+        is_var = !isempty(var_bytes) &&
+                 (byte_item(var_bytes[1]) isa ExprNewVar ||
+                  byte_item(var_bytes[1]) isa ExprVarRef)
+
+        out = if is_var
+            # Mode 2/3: substitute count into template variable, or emit as-is.
+            sub = _pure_substitute_first_var(tpl_bytes, 1, length(tpl_bytes), cnt_mork)
+            sub !== nothing ? sub : tpl_bytes   # mode 3: no variable in template
+        else
+            # Mode 1: fixed guard — skip unless count matches literal
+            var_bytes == cnt_mork || continue
+            tpl_bytes
+        end
+
         old = get_val_at(btm, out)
         set_val_at!(btm, out, UNIT_VAL)
         old === nothing && (changed = true)

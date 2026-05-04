@@ -4046,6 +4046,73 @@ const PM = PathMap.PathMap
             @test_nowarn sink_finalize!(sink, btm)
         end
 
+        # ------------------------------------------------------------------
+        # CountSink — all three upstream modes (mirrors main.rs test cases)
+        # ------------------------------------------------------------------
+
+        @testset "CountSink mode 2 — variable embed: (count (all \$k) \$k source)" begin
+            # Mirrors upstream sink_count_constant: result embeds count in template
+            s = new_space()
+            space_add_all_sexpr!(s, raw"""
+            (foo 1) (foo 2) (foo 3)
+            (bar x) (bar y)
+            (baz P) (baz Q) (baz R)
+            (exec 0 (, (foo $x) (bar $y) (baz $z)) (O (count (all $k) $k (cux $z $y $x))))
+            """)
+            space_metta_calculus!(s, typemax(Int))
+            out = space_dump_all_sexpr(s)
+            # 3 foo × 2 bar × 3 baz = 18 unique (cux ...) combos
+            @test any(l -> occursin("all", l) && occursin("18", l), split(out, "\n"))
+        end
+
+        @testset "CountSink mode 1 — fixed guard: (count (all eighteen) 18 source)" begin
+            # Mirrors upstream sink_count_literal: only emit when count == literal
+            s = new_space()
+            space_add_all_sexpr!(s, raw"""
+            (foo 1) (foo 2) (foo 3)
+            (bar x) (bar y)
+            (baz P) (baz Q) (baz R)
+            (exec 0 (, (foo $x) (bar $y) (baz $z)) (O (count (all eighteen) 18 (cux $z $y $x))))
+            (exec 0 (, (foo $x) (bar $y) (baz $z)) (O (count (all sixteen) 16 (cux $z $y $x))))
+            """)
+            space_metta_calculus!(s, typemax(Int))
+            out = space_dump_all_sexpr(s)
+            lines = split(out, "\n")
+            @test  any(l -> occursin("eighteen", l), lines)   # 18 matches → emitted
+            @test !any(l -> occursin("sixteen",  l), lines)   # 16 ≠ 18 → not emitted
+        end
+
+        @testset "CountSink mode 3 — variable no-embed: (count (all stupid) \$k source)" begin
+            # Mirrors upstream sink_count_constant: template has no $k, always emit
+            s = new_space()
+            space_add_all_sexpr!(s, raw"""
+            (foo 1) (foo 2) (foo 3)
+            (bar x) (bar y)
+            (baz P) (baz Q) (baz R)
+            (exec 0 (, (foo $x) (bar $y) (baz $z)) (O (count (all stupid) $k (cux $z $y $x))))
+            """)
+            space_metta_calculus!(s, typemax(Int))
+            out = space_dump_all_sexpr(s)
+            @test any(l -> occursin("stupid", l), split(out, "\n"))
+        end
+
+        @testset "CountSink — two independent sinks, different sources" begin
+            # Mirrors upstream count-1/count-2: independent per-variable counts
+            s = new_space()
+            space_add_all_sexpr!(s, raw"""
+            (item a) (item b) (item c)
+            (item2 a) (item2 b) (item2 c) (item2 d)
+            (exec 0 (, (item $x) (item2 $y))
+                     (O (count (count-1 $k) $k $x)
+                        (count (count-2 $j) $j $y)))
+            """)
+            space_metta_calculus!(s, typemax(Int))
+            out = space_dump_all_sexpr(s)
+            lines = split(out, "\n")
+            @test any(l -> occursin("count-1", l) && occursin("3", l), lines)
+            @test any(l -> occursin("count-2", l) && occursin("4", l), lines)
+        end
+
     end   # MORK new sinks
 
     # ==================================================================
