@@ -1026,7 +1026,7 @@ indicates whether at least one new expression was added.
 """
 # Returns true if the O-template raw bytes indicate an accumulating sink.
 # Accumulating sinks must be created ONCE before the query and finalized ONCE after.
-# Recognized: count, fsum, fmin, fmax, fprod
+# Recognized: AU, count, fsum, fmin, fmax, fprod
 function _is_accumulating_sink(raw_bytes::Vector{UInt8}) :: Bool
     length(raw_bytes) < 4 && return false
     t1 = byte_item(raw_bytes[1])
@@ -1036,7 +1036,7 @@ function _is_accumulating_sink(raw_bytes::Vector{UInt8}) :: Bool
     sz = Int(t2.size)
     3 + sz > length(raw_bytes) && return false
     name = String(raw_bytes[3 : 3+sz-1])
-    name in ("count", "fsum", "fmin", "fmax", "fprod") && return true
+    name in ("AU", "count", "fsum", "fmin", "fmax", "fprod") && return true
     false
 end
 
