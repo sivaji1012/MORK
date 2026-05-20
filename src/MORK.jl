@@ -90,6 +90,8 @@ version() = v"0.1.0"
 
 export version
 export HTTP
+# Grounding mechanism (Phase 2) — re-exported from kernel/Sources.jl
+export GROUNDED_REGISTRY, register_grounded!, is_grounded
 
 # PrecompileTools workload — caches hot method instances during Pkg.precompile().
 include("precompile.jl")

@@ -399,74 +399,179 @@ function space_query_multi_i(btm::PathMap{UnitVal}, pat_expr::MORK.Expr,
     ee_args!(ExprEnv(UInt8(0), pat_v, UInt32(0), pat_expr), pat_args)
     sources = pat_args[2:end]   # ExprEnv for each sub-pattern
 
-    # Build factors: one per sub-pattern via asource_new
-    factors = Any[]
-    for ee in sources
+    # Separate grounded sources from trie sources.
+    # GroundedSources are evaluated AFTER trie sources match, using bound variables.
+    src_types  = ASource[]
+    trie_idxs  = Int[]    # indices into sources[] of trie (non-grounded) sources
+    grnd_idxs  = Int[]    # indices into sources[] of grounded sources
+    for (k, ee) in enumerate(sources)
         span = expr_span(ee.base, Int(ee.offset) + 1)
         sub  = MORK.Expr(Vector{UInt8}(span))
         src  = asource_new(sub)
-        # ACTSource uses mmaps cache; all others ignore it
-        factor = src isa ACTSource ? source_factor(src, btm, mmaps) : source_factor(src, btm)
-        push!(factors, factor)
+        push!(src_types, src)
+        src isa GroundedSource ? push!(grnd_idxs, k) : push!(trie_idxs, k)
     end
-
-    # primary = factors[1], secondaries = factors[2:end]
-    primary    = popfirst!(factors)
-    prz        = ProductZipperG(primary, factors)
-    prefix_len = pzg_root_prefix_len(prz)
 
     candidate        = 0
     bindings_scratch = Dict{ExprVar, ExprEnv}()
     pairs_scratch    = Tuple{ExprEnv, ExprEnv}[]
 
+    # ── Case 1: all sources are grounded (no trie query needed) ──────
+    if isempty(trie_idxs)
+        for k in grnd_idxs
+            src = src_types[k]::GroundedSource
+            results = _grounded_call_no_args(src)
+            for path in results
+                candidate += 1
+                effect(Dict{ExprVar,ExprEnv}(), path) || return candidate
+            end
+        end
+        return candidate
+    end
+
+    # ── Case 2: mixed or trie-only — build ProductZipperG for trie sources ──
+    trie_ees    = sources[trie_idxs]
+    trie_srcs   = src_types[trie_idxs]
+    factors     = Any[]
+    for (src, ee) in zip(trie_srcs, trie_ees)
+        factor = src isa ACTSource ? source_factor(src, btm, mmaps) : source_factor(src, btm)
+        push!(factors, factor)
+    end
+
+    primary    = popfirst!(factors)
+    prz        = ProductZipperG(primary, factors)
+    prefix_len = pzg_root_prefix_len(prz)
+
     while pzg_to_next_val!(prz)
-        # Only yield when focus is on the last factor (mirrors query_multi_raw)
         pzg_focus_factor(prz) != pzg_factor_count(prz) - 1 && continue
 
-        # Build expression from origin_path (includes prefix for CmpSource)
         combined = collect(pzg_origin_path(prz))
-
-        # factor_paths are into path(); offset by prefix_len for origin_path
-        fps        = pzg_factor_paths(prz)
+        fps      = pzg_factor_paths(prz)
         boundaries = vcat(0, [fp + prefix_len for fp in fps], length(combined))
 
         empty!(pairs_scratch)
         all_sliced = true
-        for (k, src) in enumerate(sources)
-            lo = boundaries[k] + 1
-            hi = boundaries[k + 1]
+        for (i, ee) in enumerate(trie_ees)
+            lo = boundaries[i] + 1
+            hi = boundaries[i + 1]
             if lo > hi || lo > length(combined)
                 all_sliced = false; break
             end
             expr = MORK.Expr(combined[lo:hi])
-            push!(pairs_scratch, (src, ExprEnv(UInt8(k), UInt8(0), UInt32(0), expr)))
+            push!(pairs_scratch, (ee, ExprEnv(UInt8(i), UInt8(0), UInt32(0), expr)))
         end
         all_sliced || continue
-        length(pairs_scratch) < length(sources) && continue
 
-        # Guard: skip incomplete-secondary yields (DependentZipper primary at leaf
-        # before secondary fully traversed). Mirrors upstream which reads past end
-        # of incomplete paths — we need explicit bounds safety in Julia.
         pzg_child_count(prz) != 0 && (empty!(bindings_scratch); continue)
 
-        result = try
-            _expr_unify_inplace!(pairs_scratch, bindings_scratch)
-        catch
-            nothing  # malformed/incomplete expression bytes — skip
+        result = try _expr_unify_inplace!(pairs_scratch, bindings_scratch) catch; nothing end
+        if result !== true
+            empty!(bindings_scratch)
+            continue
         end
-        if result === true
+
+        # Apply bindings to each grounded source and call the function
+        trie_bindings = copy(bindings_scratch)
+        empty!(bindings_scratch)
+
+        if isempty(grnd_idxs)
+            # No grounded sources — emit directly
             candidate += 1
-            bindings_out = copy(bindings_scratch)
-            empty!(bindings_scratch)
-            if !effect(bindings_out, combined)
-                break
-            end
+            effect(trie_bindings, combined) || break
         else
-            empty!(bindings_scratch)
+            # For each grounded source: substitute bound variables, call, emit per result
+            emit = true
+            for k in grnd_idxs
+                src = src_types[k]::GroundedSource
+                result_paths = _grounded_call_with_bindings(src, trie_bindings)
+                isempty(result_paths) && (emit = false; break)
+                for rpath in result_paths
+                    candidate += 1
+                    merged = vcat(combined, rpath)
+                    effect(trie_bindings, merged) || return candidate
+                end
+                emit = false  # already emitted above
+            end
         end
     end
 
     candidate
+end
+
+# ── Grounded call helpers ─────────────────────────────────────────────
+
+"""Call a GroundedSource with no variable arguments (all-grounded case)."""
+function _grounded_call_no_args(src::GroundedSource) :: Vector{Vector{UInt8}}
+    f = get(GROUNDED_REGISTRY, src.name, nothing)
+    f === nothing && return Vector{UInt8}[]
+    args = _grounded_decode_args(src.expr)
+    raw  = try f(args) catch e; @warn "GroundedSource $(src.name): $e"; nothing end
+    _grounded_encode_results(raw)
+end
+
+"""Call a GroundedSource after substituting trie-matched variable bindings."""
+function _grounded_call_with_bindings(src::GroundedSource,
+                                       bindings::Dict{ExprVar,ExprEnv}) :: Vector{Vector{UInt8}}
+    f = get(GROUNDED_REGISTRY, src.name, nothing)
+    f === nothing && return Vector{UInt8}[]
+    # Apply bindings to each argument before decoding
+    raw_args = _grounded_decode_args(src.expr)
+    bound_args = map(raw_args) do a
+        # Re-encode the arg string, apply bindings, re-decode
+        try
+            e = sexpr_to_expr(a)
+            applied = _expr_apply_bindings(e, bindings)
+            expr_serialize(applied.buf)
+        catch
+            a  # fallback: pass as-is
+        end
+    end
+    raw = try f(bound_args) catch e; @warn "GroundedSource $(src.name): $e"; nothing end
+    _grounded_encode_results(raw)
+end
+
+"""Apply variable bindings to an Expr, returning a new Expr with variables replaced."""
+function _expr_apply_bindings(e::MORK.Expr, bindings::Dict{ExprVar,ExprEnv}) :: MORK.Expr
+    isempty(bindings) && return e
+    # Walk bytes and substitute NewVar/VarRef bytes with bound expression bytes
+    out = UInt8[]
+    buf = e.buf
+    i   = 1
+    var_idx = UInt8(0)
+    while i <= length(buf)
+        b = buf[i]
+        t = byte_item(b)
+        if t isa ExprNewVar
+            binding = get(bindings, ExprVar(var_idx, UInt8(0)), nothing)
+            if binding !== nothing
+                span = expr_span(binding.base, Int(binding.offset) + 1)
+                append!(out, span)
+            else
+                push!(out, b)
+            end
+            var_idx += UInt8(1)
+            i += 1
+        elseif t isa ExprVarRef
+            binding = get(bindings, ExprVar(UInt8(0), t.index), nothing)
+            if binding !== nothing
+                span = expr_span(binding.base, Int(binding.offset) + 1)
+                append!(out, span)
+            else
+                push!(out, b)
+            end
+            i += 1
+        elseif t isa ExprSymbol
+            n = Int(t.size)
+            append!(out, buf[i:i+n])
+            i += n + 1
+        elseif t isa ExprArity
+            push!(out, b)
+            i += 1
+        else
+            push!(out, b); i += 1
+        end
+    end
+    MORK.Expr(out)
 end
 
 space_query_multi_i(btm::PathMap{UnitVal}, pat_expr::MORK.Expr, effect::Function) =
@@ -1084,6 +1189,33 @@ space_transform_i_o!(s::Space, pat::MORK.Expr, tpl::MORK.Expr, add::MORK.Expr) =
                                   no_source=false, no_sink=false)
 
 # =====================================================================
+# ExecError — mirrors ExecError<S> enum in space.rs (server branch)
+# All 10 variants. Permission variants carry a message string (Julia
+# has no generic PermissionErr type parameter).
+# =====================================================================
+
+struct ExecError
+    kind    :: Symbol
+    message :: String
+end
+ExecError(kind::Symbol) = ExecError(kind, "")
+Base.show(io::IO, e::ExecError) = print(io, "ExecError($(e.kind)): $(e.message)")
+
+_exec_err_arity4(msg)          = ExecError(:ExpectedArity4,            msg)
+_exec_err_keyword(msg)         = ExecError(:ExpectedExecKeyword,       msg)
+_exec_err_thread_pair(msg)     = ExecError(:ExpectedThreadIdPair,      msg)
+_exec_err_comma_pat(msg)       = ExecError(:ExpectedCommaListPatterns, msg)
+_exec_err_comma_tpl(msg)       = ExecError(:ExpectedCommaListTemplates,msg)
+_exec_err_ground_priority(msg) = ExecError(:ExpectedGroundPriority,    msg)
+_exec_err_other(msg)           = ExecError(:OtherFmtErr,               msg)
+_exec_err_system_perm(msg)     = ExecError(:SystemPermissionErr,       msg)
+_exec_err_user_perm(msg)       = ExecError(:UserPermissionErr,         msg)
+_exec_err_retry_limit(msg)     = ExecError(:RetryLimit,                msg)
+
+is_user_perm_err(e::ExecError) = e.kind === :UserPermissionErr
+exec_error_message(e::ExecError) = "$(e.kind): $(e.message)"
+
+# =====================================================================
 # space_interpret! / space_metta_calculus! — rule evaluation engine
 # =====================================================================
 
@@ -1095,102 +1227,177 @@ const _EXEC_PREFIX = UInt8[
 ]
 
 """
-    space_interpret!(s, rt) → Bool
+    space_interpret!(s, rt) → Union{Nothing, ExecError}
 
-Execute one `(exec loc pat_expr tpl_expr)` rule expression.
-Mirrors `Space::interpret` in space.rs (simplified, no specialize_io).
+Execute one `(exec (thread_id priority) (, src...) (, tpl...))` atom.
+Mirrors `interpret_impl` in space.rs (server branch).
+
+Returns `nothing` on success, an `ExecError` on any format violation
+or permission conflict. `UserPermissionErr` → caller should re-insert
+and retry; all other errors → halt.
 """
-function space_interpret!(s::Space, rt::MORK.Expr) :: Bool
-    buf = rt.buf
-    length(buf) < 6 && return false
+function space_interpret!(s::Space, rt::MORK.Expr) :: Union{Nothing, ExecError}
+    buf  = rt.buf
+    # Safe serialisation — expr_serialize throws on reserved bytes; fall back to hex.
+    dbg  = () -> try expr_serialize(buf) catch; bytes2hex(buf) end
 
-    # Check shape: [4] exec
+    # ── Overall shape: arity-4 + "exec" keyword ───────────────────────
+    length(buf) < 6 && return _exec_err_arity4(dbg())
     t1 = byte_item(buf[1])
-    (t1 isa ExprArity && t1.arity == 4) || return false
+    (t1 isa ExprArity && t1.arity == 4) || return _exec_err_arity4(dbg())
     t2 = byte_item(buf[2])
-    (t2 isa ExprSymbol && t2.size == 4) || return false
-    buf[3:6] == Vector{UInt8}("exec") || return false
+    (t2 isa ExprSymbol && t2.size == 4) || return _exec_err_keyword(dbg())
+    buf[3:6] == UInt8[UInt8('e'),UInt8('x'),UInt8('e'),UInt8('c')] || return _exec_err_keyword(dbg())
 
-    # Decompose args: (exec loc pat_expr tpl_expr)
+    # Decompose top-level args: [1]="exec", [2]=(thread_id priority), [3]=patterns, [4]=templates
     ee_rt = ExprEnv(UInt8(0), UInt8(0), UInt32(0), rt)
     args  = ExprEnv[]
     ee_args!(ee_rt, args)
-    # args layout: [1]=functor "exec", [2]=loc, [3]=pat_expr, [4]=tpl_expr
-    length(args) < 4 && return false
+    length(args) < 4 && return _exec_err_arity4(dbg())
 
-    # args[2]=loc (ignored), args[3]=pat_expr, args[4]=tpl_expr
-    pat_ee = args[3]
-    tpl_ee = args[4]
+    # ── Validate loc arg: (thread_id priority) pair OR plain ground atom ──
+    # Server branch requires arity-2 (thread_id priority) pair.
+    # For backward compatibility with old-format (exec 0 (, ...) (, ...))
+    # we accept any loc arg that is ground — just like `debug_assert!(loc.variables() == 0)`.
+    # When loc IS arity-2, additionally validate thread_id and priority are ground.
+    loc_ee  = args[2]
+    loc_buf = loc_ee.base.buf
+    loc_off = Int(loc_ee.offset)
+    if length(loc_buf) > loc_off
+        lt = byte_item(loc_buf[loc_off + 1])
+        if lt isa ExprArity && lt.arity == 2
+            # New format: validate both children are ground
+            loc_sub_args = ExprEnv[]
+            ee_loc = ExprEnv(UInt8(0), UInt8(0), UInt32(loc_off), loc_ee.base)
+            ee_args!(ee_loc, loc_sub_args)
+            if length(loc_sub_args) >= 2
+                tid_ee  = loc_sub_args[2]
+                tid_buf = tid_ee.base.buf
+                tid_off = Int(tid_ee.offset)
+                if length(tid_buf) > tid_off && (byte_item(tid_buf[tid_off+1]) isa ExprNewVar ||
+                                                  byte_item(tid_buf[tid_off+1]) isa ExprVarRef)
+                    return _exec_err_other(dbg())
+                end
+            end
+            if length(loc_sub_args) >= 3
+                pri_ee  = loc_sub_args[3]
+                pri_buf = pri_ee.base.buf
+                pri_off = Int(pri_ee.offset)
+                if length(pri_buf) > pri_off && (byte_item(pri_buf[pri_off+1]) isa ExprNewVar ||
+                                                  byte_item(pri_buf[pri_off+1]) isa ExprVarRef)
+                    return _exec_err_ground_priority(dbg())
+                end
+            end
+        end
+        # Old format (plain atom): accepted as long as it is not a raw variable
+        if lt isa ExprNewVar || lt isa ExprVarRef
+            return _exec_err_thread_pair(dbg())
+        end
+    end
 
-    # Validate pat_expr shape: must be Arity node with `,` or `I` functor
+    # ── Validate pattern list: must start with "," ────────────────────
+    pat_ee  = args[3]
     pat_buf = pat_ee.base.buf
     pat_off = Int(pat_ee.offset)
-    length(pat_buf) <= pat_off && return false
+    length(pat_buf) <= pat_off && return _exec_err_comma_pat(dbg())
     pt = byte_item(pat_buf[pat_off + 1])
-    (pt isa ExprArity && pt.arity > 0) || return false
-    length(pat_buf) <= pat_off + 1 && return false
+    (pt isa ExprArity && pt.arity > 0) || return _exec_err_comma_pat(dbg())
+    length(pat_buf) <= pat_off + 1 && return _exec_err_comma_pat(dbg())
     pt2 = byte_item(pat_buf[pat_off + 2])
-    (pt2 isa ExprSymbol && pt2.size == 1) || return false
+    (pt2 isa ExprSymbol && pt2.size == 1) || return _exec_err_comma_pat(dbg())
+    pat_buf[pat_off + 3] == UInt8(',') || pat_buf[pat_off + 3] == UInt8('I') ||
+        return _exec_err_comma_pat(dbg())
 
-    # Validate tpl_expr shape: must be Arity node with `,` or `O` functor
+    # ── Validate template list: must start with "," or "O" ───────────
+    tpl_ee  = args[4]
     tpl_buf = tpl_ee.base.buf
     tpl_off = Int(tpl_ee.offset)
-    length(tpl_buf) <= tpl_off && return false
+    length(tpl_buf) <= tpl_off && return _exec_err_comma_tpl(dbg())
     tt = byte_item(tpl_buf[tpl_off + 1])
-    (tt isa ExprArity && tt.arity > 0) || return false
+    (tt isa ExprArity && tt.arity > 0) || return _exec_err_comma_tpl(dbg())
 
     pat_expr = MORK.Expr(pat_buf[pat_off+1 : end])
     tpl_expr = MORK.Expr(tpl_buf[tpl_off+1 : end])
 
-    # Read functor byte: pat[offset+3] is the single-char functor (`,` or `I`)
-    # tpl[offset+3] is the single-char functor (`,` or `O`)
-    # Mirrors upstream: match (*pat_expr.ptr.add(2), *tpl_expr.ptr.add(2))
     pat_functor = pat_buf[pat_off + 3]
     tpl_functor = tpl_buf[tpl_off + 3]
 
     comma = UInt8(',');  i_src = UInt8('I');  o_snk = UInt8('O')
 
-    # Dispatch to named specialize_io variants — mirrors upstream transform_multi_multi_*
-    # dispatch table in interpret() / space.rs:1699
     if pat_functor == comma && tpl_functor == comma
-        space_transform_comma_comma!(s, pat_expr, tpl_expr, rt)   # `,` / `,` — most common
+        space_transform_comma_comma!(s, pat_expr, tpl_expr, rt)
     elseif pat_functor == i_src && tpl_functor == comma
         space_transform_multi_multi!(s, pat_expr, pat_ee.v, tpl_expr, tpl_ee.v, rt;
-                                      no_source=false, no_sink=true)  # `I` / `,`
+                                      no_source=false, no_sink=true)
     elseif pat_functor == comma && tpl_functor == o_snk
         space_transform_multi_multi!(s, pat_expr, pat_ee.v, tpl_expr, tpl_ee.v, rt;
-                                      no_source=true, no_sink=false)  # `,` / `O`
+                                      no_source=true, no_sink=false)
     elseif pat_functor == i_src && tpl_functor == o_snk
         space_transform_multi_multi!(s, pat_expr, pat_ee.v, tpl_expr, tpl_ee.v, rt;
-                                      no_source=false, no_sink=false) # `I` / `O`
+                                      no_source=false, no_sink=false)
     else
-        return false  # invalid functor combination
+        return _exec_err_other("unknown functor combination: pat=$(Char(pat_functor)) tpl=$(Char(tpl_functor))")
     end
-    true
+    nothing
 end
 
 """
     space_metta_calculus!(s, steps=∞) → Int
 
-Repeatedly find `(exec ...)` expressions in the space, remove and execute them.
-Returns the number of steps performed.
-Mirrors `Space::metta_calculus` in space.rs.
+Repeatedly find `(exec ...)` atoms, remove and execute them.
+Mirrors `metta_calculus_impl` in space.rs (server branch):
+  - On `UserPermissionErr` re-inserts the atom and retries (up to
+    `_METTA_CALCULUS_MAX_RETRIES` times with a 1ms sleep).
+  - On any other error logs and halts.
+Returns steps executed.
 """
+const _METTA_CALCULUS_MAX_RETRIES = 2000
+
 function space_metta_calculus!(s::Space, steps::Int=typemax(Int)) :: Int
-    done = 0
+    done      = 0
+    retry     = false
+    retry_cnt = _METTA_CALCULUS_MAX_RETRIES
+    # Buffer reuse — mirrors Rust's `buffer: Vec<u8>` reset to prefix each iteration
+    last_path = UInt8[]
+
     while done < steps
-        rz = read_zipper_at_path(s.btm, _EXEC_PREFIX)
+        rz    = read_zipper_at_path(s.btm, _EXEC_PREFIX)
         found = zipper_to_next_val!(rz)
-        !found && break
+
+        if !found
+            if retry && retry_cnt > 0
+                retry_cnt -= 1
+                sleep(0.001)   # 1 ms — mirrors std::thread::sleep(1ms)
+                continue
+            end
+            break  # all execs consumed
+        end
 
         rel_path  = collect(zipper_path(rz))
         full_path = vcat(_EXEC_PREFIX, rel_path)
-
         remove_val_at!(s.btm, full_path)
 
-        rt = MORK.Expr(full_path)
-        space_interpret!(s, rt)
-        done += 1
+        rt  = MORK.Expr(copy(full_path))
+        err = space_interpret!(s, rt)
+
+        if err === nothing
+            retry     = false
+            retry_cnt = _METTA_CALCULUS_MAX_RETRIES
+            done += 1
+        elseif is_user_perm_err(err)
+            # Re-insert and try a different exec atom next iteration
+            set_val_at!(s.btm, full_path, UNIT_VAL)
+            retry = true
+            if retry_cnt <= 0
+                @warn "space_metta_calculus!: retry limit exceeded — $(exec_error_message(err))"
+                break
+            end
+            retry_cnt -= 1
+            sleep(0.001)
+        else
+            @warn "space_metta_calculus!: $(exec_error_message(err))"
+            break
+        end
     end
     done
 end
@@ -1446,26 +1653,47 @@ function space_metta_calculus_at!(s::Space, location_sexpr::AbstractString,
                                    max_steps::Int=typemax(Int)) :: Int
     # Build the exec prefix for this location: (exec (<location> $) $ $)
     # Mirrors metta_calculus_impl: prefix_e = format!("(exec ({} $) $ $)", thread_id)
-    # CRITICAL: use only the CONSTANT prefix (bytes up to first NewVar) so the
-    # read_zipper navigates to the right subtrie. Full buf includes variable bytes
-    # (0xC0 NewVar) which don't exist in the stored paths.
     prefix_str = "(exec ($location_sexpr \$) \$ \$)"
     try
         prefix_expr  = sexpr_to_expr(prefix_str)
-        prefix_bytes = _derive_prefix(prefix_expr)   # constant prefix only
+        prefix_bytes = _derive_prefix(prefix_expr)
 
-        done = 0
+        done      = 0
+        retry     = false
+        retry_cnt = _METTA_CALCULUS_MAX_RETRIES
+
         while done < max_steps
             rz    = read_zipper_at_path(s.btm, prefix_bytes)
             found = zipper_to_next_val!(rz)
-            !found && break
+            if !found
+                if retry && retry_cnt > 0
+                    retry_cnt -= 1
+                    sleep(0.001)
+                    continue
+                end
+                break
+            end
 
             rel_path  = collect(zipper_path(rz))
             full_path = vcat(prefix_bytes, rel_path)
             remove_val_at!(s.btm, full_path)
-            rt = MORK.Expr(full_path)
-            space_interpret!(s, rt)
-            done += 1
+
+            rt  = MORK.Expr(copy(full_path))
+            err = space_interpret!(s, rt)
+
+            if err === nothing
+                retry     = false
+                retry_cnt = _METTA_CALCULUS_MAX_RETRIES
+                done += 1
+            elseif is_user_perm_err(err)
+                set_val_at!(s.btm, full_path, UNIT_VAL)
+                retry = true
+                retry_cnt > 0 ? (retry_cnt -= 1; sleep(0.001)) :
+                    (@warn "space_metta_calculus_at!: retry limit at $location_sexpr"; break)
+            else
+                @warn "space_metta_calculus_at!: $(exec_error_message(err))"
+                break
+            end
         end
         done
     catch e
@@ -1483,52 +1711,89 @@ end
 #   writer_paths      = Vector{Vector{UInt8}} (one path per unique writer slot)
 # =====================================================================
 
+"""
+    space_acquire_transform_permissions(s, patterns, templates)
+      → (read_map, template_prefixes, writer_slots)
+
+Mirrors `Space::acquire_transform_permissions` in space_temporary.rs.
+
+1. Compute constant prefix for each template (bytes up to first variable).
+2. Sort template prefixes shortest-first; find minimal writer slots via
+   prefix subsumption (a longer prefix is subsumed by a shorter one that
+   is a prefix of it — they share one write lock).
+3. Copy each pattern's subtrie into `read_map` (a local PathMap snapshot).
+4. Return:
+   - `read_map`          — PathMap containing all pattern atoms
+   - `template_prefixes` — Vector of (incremental_start::Int, slot_idx::Int)
+   - `writer_slots`      — Vector{Vector{UInt8}} (one path per unique slot)
+"""
 function space_acquire_transform_permissions(s::Space,
                                               patterns::Vector{MORK.Expr},
                                               templates::Vector{MORK.Expr})
-    # Compute constant prefix for each expression (longest ground prefix)
-    # Simplified: use empty prefix (matches all) — mirrors till_constant_to_full fallback
-    _prefix(e::MORK.Expr) = UInt8[]
+    # Constant prefix: bytes up to first variable byte (NewVar 0xC0 or VarRef 0x80-0xBF)
+    function _const_prefix(e::MORK.Expr)
+        buf = e.buf
+        i = 1
+        while i <= length(buf)
+            b = buf[i]
+            t = byte_item(b)
+            if t isa ExprNewVar || t isa ExprVarRef
+                break
+            elseif t isa ExprSymbol
+                i += 1 + Int(t.size)
+            elseif t isa ExprArity
+                i += 1
+            else
+                break
+            end
+        end
+        buf[1:i-1]
+    end
 
-    # Build template prefix table, sorted shortest-first (mirrors sort_by len)
-    tpl_paths = [_prefix(t) for t in templates]
-    sorted_idx = sortperm(tpl_paths; by=length)
+    # ── Writer slot subsumption (mirrors template_path_table sort + loop) ──
+    # Table: (path, original_template_idx, writer_slot_idx)
+    tpl_table = [(copy(_const_prefix(templates[i])), i, 0) for i in eachindex(templates)]
+    sort!(tpl_table; by = t -> length(t[1]))   # shortest-first
 
-    # Find unique writer slots via prefix subsumption
-    writer_slots = Vector{UInt8}[]
-    writer_slot_idx = zeros(Int, length(templates))
-    for i in sorted_idx
-        path = tpl_paths[i]
+    writer_slots    = Vector{UInt8}[]
+    slot_of         = zeros(Int, length(templates))   # template_idx → slot_idx
+
+    for k in eachindex(tpl_table)
+        path, orig_idx, _ = tpl_table[k]
         subsumed = false
         for (slot_idx, slot_path) in enumerate(writer_slots)
-            overlap = 0
-            for j in 1:min(length(path), length(slot_path))
-                path[j] == slot_path[j] ? (overlap = j) : break
-            end
-            if overlap == length(slot_path)
-                writer_slot_idx[i] = slot_idx
+            # slot_path is a prefix of path iff path starts with slot_path
+            if length(slot_path) <= length(path) &&
+               path[1:length(slot_path)] == slot_path
+                slot_of[orig_idx] = slot_idx
+                tpl_table[k] = (path, orig_idx, slot_idx)
                 subsumed = true
                 break
             end
         end
         if !subsumed
             push!(writer_slots, path)
-            writer_slot_idx[i] = length(writer_slots)
+            new_slot = length(writer_slots)
+            slot_of[orig_idx] = new_slot
+            tpl_table[k] = (path, orig_idx, new_slot)
         end
     end
 
-    # Build template_prefixes: (incremental_path_start, writer_slot_idx)
-    template_prefixes = [(length(writer_slots[writer_slot_idx[i]]), writer_slot_idx[i])
-                         for i in 1:length(templates)]
+    # template_prefixes[i] = (incremental_start, slot_idx)
+    # incremental_start = length of the writer slot path (bytes already
+    # implied by the slot prefix; template path bytes beyond that are
+    # "incremental" relative to the slot zipper position).
+    template_prefixes = [(length(writer_slots[slot_of[i]]), slot_of[i])
+                         for i in eachindex(templates)]
 
-    # Build read_map: copy each pattern subtrie
+    # ── Build read_map: snapshot all pattern subtries ──────────────────
     read_map = PathMap{UnitVal}()
     for pat in patterns
-        prefix = _prefix(pat)
+        prefix = _const_prefix(pat)
         rz = read_zipper_at_path(s.btm, prefix)
-        wz = write_zipper_at_path(read_map, prefix)
         while zipper_to_next_val!(rz)
-            set_val_at!(read_map, collect(zipper_path(rz)), UNIT_VAL)
+            p = vcat(prefix, collect(zipper_path(rz)))
+            set_val_at!(read_map, p, UNIT_VAL)
         end
     end
 
@@ -1543,7 +1808,9 @@ export _var_children, _size_children, _arity_children
 export space_transform_multi_multi!
 export space_transform_comma_comma!, space_transform_i_comma!
 export space_transform_comma_o!, space_transform_i_o!
-export space_interpret!, space_metta_calculus!
+export ExecError, is_user_perm_err, exec_error_message
+export space_interpret!, space_metta_calculus!, _METTA_CALCULUS_MAX_RETRIES
+export _grounded_call_no_args, _grounded_call_with_bindings, _grounded_decode_args, _grounded_encode_results
 export space_sexpr_to_expr, space_metta_calculus_at!, space_acquire_transform_permissions
 
 # Precompile hot-path method specializations so JIT fires at package load,
