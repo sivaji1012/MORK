@@ -828,7 +828,12 @@ function _coreferential_transition!(loc,   # ReadZipperCore (single) or ProductZ
 
     elseif tag isa ExprVarRef
         i = Int(tag.idx)
-        new_ee = if e.n == 0 && i < length(references)
+        # Upstream fix e551924: guard against sentinel typemax(Int) —
+        # references[i+1] == typemax(Int) means this variable was first bound at
+        # a free (NewVar) data position → VarRef should match anything.
+        # Old: e.n == 0 && i < length(references)
+        # New: e.n == 0 && i < length(references) && references[i+1] != typemax(Int)
+        new_ee = if e.n == 0 && i < length(references) && references[i + 1] != typemax(Int)
             ref_off      = references[i + 1]
             path         = _coref_path(loc)
             resolved_buf = Vector{UInt8}(path[ref_off + 1 : end])
@@ -838,6 +843,7 @@ function _coreferential_transition!(loc,   # ReadZipperCore (single) or ProductZ
             ExprEnv(UInt8(255), UInt8(0), UInt32(0), MORK.Expr([static_nv]))
         end
 
+        # vs!(e, true) — variable context: no sentinel push for NewVar children.
         push!(stack, new_ee)
         m_vars = _var_children(loc)
         for b in m_vars
@@ -850,8 +856,15 @@ function _coreferential_transition!(loc,   # ReadZipperCore (single) or ProductZ
 
     elseif tag isa ExprSymbol
         size   = Int(tag.size)
-        m_vars = _var_children(loc)
+        # vs!(e, false) — non-variable context: push sentinel typemax(Int) when
+        # the trie has a free (NewVar) child.  Mirrors upstream fix e551924
+        # ("Allow decreasing pattern specificity in coreferential transition").
+        nv_byte = item_byte(ExprNewVar())
+        m_vars  = _var_children(loc)
         for b in m_vars
+            if b == nv_byte && e.n == 0
+                push!(references, typemax(Int))
+            end
             _coref_descend_byte!(loc, b)
             _coreferential_transition!(loc, stack, references, f)
             _coref_ascend_byte!(loc)
@@ -866,8 +879,14 @@ function _coreferential_transition!(loc,   # ReadZipperCore (single) or ProductZ
 
     elseif tag isa ExprArity
         arity = Int(tag.arity)
-        m_vars = _var_children(loc)
+        # vs!(e, false) — non-variable context: push sentinel typemax(Int) when
+        # the trie has a free (NewVar) child.  Mirrors upstream fix e551924.
+        nv_byte = item_byte(ExprNewVar())
+        m_vars  = _var_children(loc)
         for b in m_vars
+            if b == nv_byte && e.n == 0
+                push!(references, typemax(Int))
+            end
             _coref_descend_byte!(loc, b)
             _coreferential_transition!(loc, stack, references, f)
             _coref_ascend_byte!(loc)
