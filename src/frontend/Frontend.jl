@@ -183,6 +183,19 @@ function sexpr_parse!(parser::MorkParser, ctx::SexprContext, target::ExprZipper)
                         _ctx_next!(ctx)
                     end
                 end
+                sym_bytes_raw = view(ctx.src, start:ctx.loc-1)
+                # Guarantee double-quote terminator on truncation (mirrors bytestring_parser.rs 2d6730b).
+                # Symbols are capped at 63 bytes by the tag encoding (6-bit size field).
+                sym_bytes = if length(sym_bytes_raw) > 63
+                    tmp = Vector{UInt8}(sym_bytes_raw[1:63])
+                    tmp[63] = UInt8('"')
+                    tmp
+                else
+                    sym_bytes_raw
+                end
+                tok = fe_tokenizer(parser, sym_bytes)
+                ez_write_symbol!(target, tok)
+                return
             else
                 while _ctx_has_next(ctx)
                     p = _ctx_peek(ctx)

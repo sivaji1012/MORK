@@ -67,7 +67,7 @@ end
 
 # _derive_prefix: constant prefix of expr up to first NewVar/VarRef.
 # "a" → full; "(isa)" → full; "(isa \$x \$y)" → [Arity3, "isa"]; "\$x" → []
-# Mirrors derive_prefix_from_expr_slice + till_constant_to_till_last_constant.
+# Mirrors derive_prefix_from_expr_slice + till_constant_to_full (upstream 83d1276).
 function _derive_prefix(expr::MORK.Expr) :: Vector{UInt8}
     buf = expr.buf
     n   = length(buf)
